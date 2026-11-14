@@ -1,0 +1,11 @@
+[package]
+name = "gindema-guard"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+description = "Runtime anti-tamper watchdog, timing and entropy checks, pollution-state responses instead of crashing."
+publish = false
+
+[dependencies]
+gindema-common = { path = "../gindema-common" }

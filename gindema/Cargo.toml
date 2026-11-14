@@ -1,0 +1,27 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/gindema-common",
+  "crates/gindema-vm",
+  "crates/gindema-obfuscate",
+  "crates/gindema-guard",
+  "crates/gindema-container",
+  "crates/gindema-ptr",
+  "crates/gindema-bits",
+  "crates/gindema-cli",
+  "crates/mirage-core",
+  "crates/mirage-ffmpeg",
+  "crates/mirage-cli",
+]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.75"
+license-file = "LICENSE"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "warn"
