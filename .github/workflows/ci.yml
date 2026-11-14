@@ -1,0 +1,24 @@
+name: CI
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.75
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-gindema-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-gindema-
+      - run: cargo test --workspace
+      - run: cargo clippy --workspace -- -D warnings
+      - run: cargo fmt --check
+      # TODO: parse cargo test/clippy output into $GITHUB_STEP_SUMMARY.
+      # TODO: upload raw log + parsed JSON via actions/upload-artifact.
