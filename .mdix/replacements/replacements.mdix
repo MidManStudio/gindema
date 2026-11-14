@@ -1,0 +1,22 @@
+// .mdix/replacements/replacements.mdix
+@CONFIG(
+  version    -> "1.0.0"
+  author     -> "MidManStudio"
+  features   -> "quickfuncs,data"
+  debug_mode -> "off"
+)
+
+@QUICKFUNCS(
+  ~target<object>(name, path) { return { name = name, path = path } }
+)
+
+@DATA(
+  target_root = "."
+
+  overrides::
+    target("ROOT_Cargo.toml", "Cargo.toml")
+    target("README.md", "README.md")
+    target("LICENSE", "LICENSE")
+    target("CHANGELOG.md", "CHANGELOG.md")
+    target("gitignore", ".gitignore")
+)
