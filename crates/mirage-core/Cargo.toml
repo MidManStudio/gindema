@@ -1,0 +1,11 @@
+[package]
+name = "mirage-core"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+description = "Adversarial perturbation algorithms for gameplay video/image poisoning."
+publish = false
+
+[dependencies]
+gindema-common = { path = "../gindema-common" }

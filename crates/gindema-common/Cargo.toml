@@ -1,0 +1,10 @@
+[package]
+name = "gindema-common"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+description = "Shared error types, traits, and small utilities used across the gindema workspace."
+publish = false
+
+[dependencies]
