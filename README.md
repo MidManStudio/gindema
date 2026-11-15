@@ -34,6 +34,7 @@ Protection core:
 Video/image poisoning (placeholder name "mirage", rename before shipping):
 - `crates/mirage-core` - perturbation algorithms
 - `crates/mirage-ffmpeg` - FFmpeg integration
+- `crates/mirage-train` - offline PGD-based training step that produces the perturbation pattern
 - `crates/mirage-cli` - the distributable video-poisoning CLI
 
 Visual effects (unrelated to the anti-AI purpose, just a styling tool):

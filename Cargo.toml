@@ -11,6 +11,7 @@ members = [
   "crates/gindema-cli",
   "crates/mirage-core",
   "crates/mirage-ffmpeg",
+  "crates/mirage-train",
   "crates/mirage-cli",
   "crates/pixelflip-core",
   "crates/pixelflip-cli",

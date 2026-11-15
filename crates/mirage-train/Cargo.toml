@@ -1,0 +1,22 @@
+[package]
+name = "mirage-train"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+description = "Offline training step that produces the adversarial perturbation pattern mirage-core ships with."
+publish = false
+
+[[bin]]
+name = "mirage-train"
+path = "src/main.rs"
+
+[dependencies]
+gindema-common = { path = "../gindema-common" }
+mirage-core = { path = "../mirage-core" }
+candle-core = "0.11"
+candle-nn = "0.11"
+candle-transformers = "0.11"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+clap = { version = "4.6", features = ["derive"] }
+anyhow = "1"
