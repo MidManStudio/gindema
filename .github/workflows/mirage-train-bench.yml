@@ -10,6 +10,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       - uses: actions/cache@v4
         with:
           path: |
@@ -18,9 +20,42 @@ jobs:
             ~/.cargo/git
           key: ${{ runner.os }}-cargo-gindema-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-gindema-
-      - run: cargo build -p mirage-train --release
-      - run: cargo test -p mirage-train
-      - run: cargo clippy -p mirage-train -- -D warnings
+
+      - name: Toolchain info
+        run: |
+          mkdir -p ci-logs
+          { rustc --version; cargo --version; } | tee ci-logs/toolchain.txt
+
+      - name: cargo build (release)
+        id: build
+        run: |
+          set -o pipefail
+          s=$(date +%s); rc=0
+          cargo build -p mirage-train --release 2>&1 | tee ci-logs/build.log || rc=$?
+          echo $(( $(date +%s) - s )) > ci-logs/build.secs
+          exit $rc
+
+      # test and clippy still run if the build failed, so one run reports everything.
+      - name: cargo test
+        id: test
+        if: ${{ !cancelled() }}
+        run: |
+          set -o pipefail
+          s=$(date +%s); rc=0
+          cargo test -p mirage-train 2>&1 | tee ci-logs/test.log || rc=$?
+          echo $(( $(date +%s) - s )) > ci-logs/test.secs
+          exit $rc
+
+      - name: cargo clippy
+        id: clippy
+        if: ${{ !cancelled() }}
+        run: |
+          set -o pipefail
+          s=$(date +%s); rc=0
+          cargo clippy -p mirage-train -- -D warnings 2>&1 | tee ci-logs/clippy.log || rc=$?
+          echo $(( $(date +%s) - s )) > ci-logs/clippy.secs
+          exit $rc
+
       # TODO: once mirage-train has a real implementation — pull a small
       # CLIP checkpoint + a tiny sample image set, run the PGD loop at a
       # reduced step count, and assert the resulting perturbation (a) stays
@@ -29,3 +64,81 @@ jobs:
       # round-trip. That's the real "benchmark." This job currently only
       # proves the crate builds and its tests pass on the actual stable
       # toolchain.
+
+      - name: Job summary
+        if: ${{ always() }}
+        run: |
+          icon() {
+            case "$1" in
+              success) echo "✅ passed" ;;
+              failure) echo "❌ failed" ;;
+              skipped) echo "⏭️ skipped" ;;
+              *) echo "$1" ;;
+            esac
+          }
+
+          secs() {
+            if [ -f "ci-logs/$1.secs" ]; then echo "$(cat "ci-logs/$1.secs")s"; else echo "n/a"; fi
+          }
+
+          show_errors() {
+            name="$1"; outcome="$2"; file="$3"
+            [ "$outcome" = "failure" ] || return 0
+            {
+              echo
+              echo "<details open><summary>${name}: first errors</summary>"
+              echo
+              echo '```'
+              grep -m 10 -A 8 -E '^error|^failures:|FAILED$' "$file" 2>/dev/null | head -n 120 || true
+              echo '```'
+              echo "</details>"
+            } >> "$GITHUB_STEP_SUMMARY"
+          }
+
+          counts=$(awk '/^test result:/ { for (i = 1; i <= NF; i++) { if ($i == "passed;") p += $(i-1); if ($i == "failed;") f += $(i-1); if ($i == "ignored;") g += $(i-1) } } END { print p+0, f+0, g+0 }' ci-logs/test.log 2>/dev/null || true)
+          set -- ${counts:-0 0 0}
+          passed=$1; failed=$2; ignored=$3
+          toolchain=$(head -n 1 ci-logs/toolchain.txt 2>/dev/null || echo unknown)
+
+          bin=target/release/mirage-train
+          if [ -f "$bin" ]; then
+            bytes=$(stat -c %s "$bin")
+            size="$(numfmt --to=iec "$bytes" 2>/dev/null || echo "${bytes} B") (${bytes} bytes)"
+          else
+            bytes=0
+            size="n/a"
+          fi
+
+          {
+            echo "## mirage-train bench summary"
+            echo
+            echo "- **Toolchain:** \`${toolchain}\`"
+            echo "- **Commit:** \`${GITHUB_SHA::7}\`"
+            echo "- **Release binary size:** ${size}"
+            echo
+            echo "| Step | Result | Time |"
+            echo "|---|---|---|"
+            echo "| cargo build --release | $(icon '${{ steps.build.outcome }}') | $(secs build) |"
+            echo "| cargo test | $(icon '${{ steps.test.outcome }}') | $(secs test) |"
+            echo "| ↳ tests | ${passed} passed, ${failed} failed, ${ignored} ignored | |"
+            echo "| cargo clippy -D warnings | $(icon '${{ steps.clippy.outcome }}') | $(secs clippy) |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          show_errors "cargo build" "${{ steps.build.outcome }}" ci-logs/build.log
+          show_errors "cargo test" "${{ steps.test.outcome }}" ci-logs/test.log
+          show_errors "cargo clippy" "${{ steps.clippy.outcome }}" ci-logs/clippy.log
+
+          printf '{"toolchain":"%s","commit":"%s","build":"%s","build_secs":"%s","test":"%s","clippy":"%s","tests_passed":%s,"tests_failed":%s,"tests_ignored":%s,"binary_bytes":%s}\n' \
+            "$toolchain" "${GITHUB_SHA::7}" \
+            "${{ steps.build.outcome }}" "$(cat ci-logs/build.secs 2>/dev/null || echo n/a)" \
+            "${{ steps.test.outcome }}" "${{ steps.clippy.outcome }}" \
+            "$passed" "$failed" "$ignored" "$bytes" > ci-logs/summary.json
+
+      - name: Upload logs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: mirage-train-bench-logs
+          path: ci-logs/
+          if-no-files-found: ignore
+          retention-days: 14
