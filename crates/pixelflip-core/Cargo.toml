@@ -1,0 +1,13 @@
+[package]
+name = "pixelflip-core"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+description = "Pattern-based pixel negation effects. Standalone visual-effects crate, not part of the anti-AI tooling."
+publish = false
+
+[dependencies]
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+
+[dev-dependencies]

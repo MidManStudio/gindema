@@ -12,11 +12,13 @@ members = [
   "crates/mirage-core",
   "crates/mirage-ffmpeg",
   "crates/mirage-cli",
+  "crates/pixelflip-core",
+  "crates/pixelflip-cli",
 ]
 
 [workspace.package]
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.85"
 license-file = "LICENSE"
 
 [workspace.lints.rust]
