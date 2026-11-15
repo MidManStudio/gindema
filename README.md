@@ -7,26 +7,32 @@ Closed-source code/binary protection core **and** gameplay video/image poisoning
 Scaffold stage for `gindema-*` and `mirage-*`: crate structure is real, the
 logic inside each isn't written yet. `pixelflip-*` is real and working.
 
-## MSRV: 1.88, not 1.75 or 1.85
+## Toolchain: stable (1.100 at time of writing), not 1.75, 1.85 or 1.88
 
-Originally pinned to `rust-version = "1.75"` (`[workspace.package]`,
-inherited from mid-engine's convention). Current crates.io dependencies moved
-past that: `image`, `clap`, `dixscript`, and `candle-core` (needed for
-`mirage-train`) pull in transitive dependencies that require Cargo's
-`edition2024` feature, which needs Rust 1.85+.
+Originally pinned to `rust-version = "1.75"` (inherited from mid-engine's
+convention). That floor has been raised three times, each time because a real
+CI run said so:
 
-1.85 turned out not to be enough either. The first real CI run
-(`mirage-train bench` #1, on a 1.85.1 runner) failed at dependency
-resolution: `image 0.25.10` and `zip 9.6.0` (pulled in by `candle-core`) both
-declare `rust-version` 1.88. So the floor is 1.88, and CI pins
-`dtolnay/rust-toolchain@1.88` to match. The earlier "verified clean at 1.85+"
-claim that used to be here did not hold up against a real runner and has been
-removed.
+- **1.85** (first guess, for the `edition2024` dependencies): `mirage-train
+  bench` #1 failed at dependency resolution. `image 0.25.10` and `zip 9.6.0`
+  (pulled in by `candle-core`) both require 1.88.
+- **1.88**: `mirage-train bench` #2 resolved fine, then failed compiling
+  `candle-core 0.11.1` itself. Its x86 quantized kernels
+  (`quantized/repack_x86.rs`, not behind any cargo feature) use AVX-512 and
+  `avxvnni` target features and intrinsics, which were unstable before Rust
+  1.89, and call `__cpuid_count` from safe code, which only became a safe
+  function in `stdarch` after the revision that shipped in Rust 1.92.
+  `candle-core` declares no `rust-version`, so Cargo can't warn about any of
+  this up front.
+- **Now**: CI builds on `stable` and `[workspace.package] rust-version` is
+  1.100, the version that was current when this was last verified. The real
+  floor is somewhere above 1.92 and hasn't been bisected, since these ship as
+  prebuilt binaries and nobody downstream builds them from source.
 
-The workspace also sets `resolver = "3"`, which makes Cargo prefer dependency
-versions compatible with the declared `rust-version` instead of always taking
-the newest, so a future release that raises its own MSRV past 1.88 doesn't
-silently break the build.
+The earlier "verified clean at 1.85+" claim in this file was wrong and has
+been removed. `resolver = "3"` is set, so Cargo prefers dependency versions
+compatible with the declared `rust-version` instead of always taking the
+newest.
 
 ## Workspace layout
 
