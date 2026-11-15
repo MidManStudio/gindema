@@ -9,7 +9,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.85
+      - uses: dtolnay/rust-toolchain@1.88
       - uses: actions/cache@v4
         with:
           path: |
@@ -27,6 +27,5 @@ jobs:
       # within the L-infinity budget and (b) still shifts the CLIP
       # embedding by more than some threshold after a JPEG re-encode
       # round-trip. That's the real "benchmark." This job currently only
-      # proves the crate builds and its tests pass on the actual 1.85
-      # toolchain — a real check, since nothing in this chat can compile
-      # Rust at all, let alone at 1.85.
+      # proves the crate builds and its tests pass on the actual 1.88
+      # toolchain.
