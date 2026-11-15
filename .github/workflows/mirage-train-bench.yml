@@ -1,0 +1,32 @@
+# .github/workflows/mirage-train-bench.yml
+name: mirage-train bench
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-and-smoke-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.85
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-gindema-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-gindema-
+      - run: cargo build -p mirage-train --release
+      - run: cargo test -p mirage-train
+      - run: cargo clippy -p mirage-train -- -D warnings
+      # TODO: once mirage-train has a real implementation — pull a small
+      # CLIP checkpoint + a tiny sample image set, run the PGD loop at a
+      # reduced step count, and assert the resulting perturbation (a) stays
+      # within the L-infinity budget and (b) still shifts the CLIP
+      # embedding by more than some threshold after a JPEG re-encode
+      # round-trip. That's the real "benchmark." This job currently only
+      # proves the crate builds and its tests pass on the actual 1.85
+      # toolchain — a real check, since nothing in this chat can compile
+      # Rust at all, let alone at 1.85.
