@@ -1,5 +1,5 @@
 [workspace]
-resolver = "2"
+resolver = "3"
 members = [
   "crates/gindema-common",
   "crates/gindema-vm",
@@ -19,7 +19,7 @@ members = [
 
 [workspace.package]
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.88"
 license-file = "LICENSE"
 
 [workspace.lints.rust]

@@ -7,17 +7,26 @@ Closed-source code/binary protection core **and** gameplay video/image poisoning
 Scaffold stage for `gindema-*` and `mirage-*`: crate structure is real, the
 logic inside each isn't written yet. `pixelflip-*` is real and working.
 
-## MSRV: 1.85, not 1.75
+## MSRV: 1.88, not 1.75 or 1.85
 
 Originally pinned to `rust-version = "1.75"` (`[workspace.package]`,
-inherited from mid-engine's convention), but current crates.io dependencies
-don't support that anymore: `image`, `clap`, `dixscript`, and `candle-core`
-(needed for `mirage-train`) all pull in transitive dependencies that
-require Cargo's `edition2024` feature, which needs Rust 1.85+. Confirmed by
-actually running `cargo check --workspace` and `cargo test --workspace`
-under both floors: 1.75 fails on all four, 1.85+ passes clean across the
-whole workspace, `dixscript` included. Matches DixScript's own README badge
-(1.85+), its `Cargo.toml` metadata field claiming 1.75 is stale.
+inherited from mid-engine's convention). Current crates.io dependencies moved
+past that: `image`, `clap`, `dixscript`, and `candle-core` (needed for
+`mirage-train`) pull in transitive dependencies that require Cargo's
+`edition2024` feature, which needs Rust 1.85+.
+
+1.85 turned out not to be enough either. The first real CI run
+(`mirage-train bench` #1, on a 1.85.1 runner) failed at dependency
+resolution: `image 0.25.10` and `zip 9.6.0` (pulled in by `candle-core`) both
+declare `rust-version` 1.88. So the floor is 1.88, and CI pins
+`dtolnay/rust-toolchain@1.88` to match. The earlier "verified clean at 1.85+"
+claim that used to be here did not hold up against a real runner and has been
+removed.
+
+The workspace also sets `resolver = "3"`, which makes Cargo prefer dependency
+versions compatible with the declared `rust-version` instead of always taking
+the newest, so a future release that raises its own MSRV past 1.88 doesn't
+silently break the build.
 
 ## Workspace layout
 
