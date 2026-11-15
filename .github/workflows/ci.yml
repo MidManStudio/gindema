@@ -10,6 +10,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
       - uses: actions/cache@v4
         with:
           path: |
@@ -18,8 +20,98 @@ jobs:
             ~/.cargo/git
           key: ${{ runner.os }}-cargo-gindema-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-gindema-
-      - run: cargo test --workspace
-      - run: cargo clippy --workspace -- -D warnings
-      - run: cargo fmt --check
-      # TODO: parse cargo test/clippy output into $GITHUB_STEP_SUMMARY.
-      # TODO: upload raw log + parsed JSON via actions/upload-artifact.
+
+      - name: Toolchain info
+        run: |
+          mkdir -p ci-logs
+          { rustc --version; cargo --version; } | tee ci-logs/toolchain.txt
+
+      - name: cargo test
+        id: test
+        run: |
+          set -o pipefail
+          rc=0
+          cargo test --workspace 2>&1 | tee ci-logs/test.log || rc=$?
+          exit $rc
+
+      # clippy and fmt still run if tests failed, so one run reports everything.
+      - name: cargo clippy
+        id: clippy
+        if: ${{ !cancelled() }}
+        run: |
+          set -o pipefail
+          rc=0
+          cargo clippy --workspace -- -D warnings 2>&1 | tee ci-logs/clippy.log || rc=$?
+          exit $rc
+
+      - name: cargo fmt
+        id: fmt
+        if: ${{ !cancelled() }}
+        run: |
+          set -o pipefail
+          rc=0
+          cargo fmt --check 2>&1 | tee ci-logs/fmt.log || rc=$?
+          exit $rc
+
+      - name: Job summary
+        if: ${{ always() }}
+        run: |
+          icon() {
+            case "$1" in
+              success) echo "✅ passed" ;;
+              failure) echo "❌ failed" ;;
+              skipped) echo "⏭️ skipped" ;;
+              *) echo "$1" ;;
+            esac
+          }
+
+          show_errors() {
+            name="$1"; outcome="$2"; file="$3"
+            [ "$outcome" = "failure" ] || return 0
+            {
+              echo
+              echo "<details open><summary>${name}: first errors</summary>"
+              echo
+              echo '```'
+              grep -m 10 -A 8 -E '^error|^failures:|FAILED$|^Diff in' "$file" 2>/dev/null | head -n 120 || true
+              echo '```'
+              echo "</details>"
+            } >> "$GITHUB_STEP_SUMMARY"
+          }
+
+          counts=$(awk '/^test result:/ { for (i = 1; i <= NF; i++) { if ($i == "passed;") p += $(i-1); if ($i == "failed;") f += $(i-1); if ($i == "ignored;") g += $(i-1) } } END { print p+0, f+0, g+0 }' ci-logs/test.log 2>/dev/null || true)
+          set -- ${counts:-0 0 0}
+          passed=$1; failed=$2; ignored=$3
+          toolchain=$(head -n 1 ci-logs/toolchain.txt 2>/dev/null || echo unknown)
+
+          {
+            echo "## CI summary"
+            echo
+            echo "- **Toolchain:** \`${toolchain}\`"
+            echo "- **Commit:** \`${GITHUB_SHA::7}\`"
+            echo
+            echo "| Check | Result |"
+            echo "|---|---|"
+            echo "| cargo test --workspace | $(icon '${{ steps.test.outcome }}') |"
+            echo "| ↳ tests | ${passed} passed, ${failed} failed, ${ignored} ignored |"
+            echo "| cargo clippy -D warnings | $(icon '${{ steps.clippy.outcome }}') |"
+            echo "| cargo fmt --check | $(icon '${{ steps.fmt.outcome }}') |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          show_errors "cargo test" "${{ steps.test.outcome }}" ci-logs/test.log
+          show_errors "cargo clippy" "${{ steps.clippy.outcome }}" ci-logs/clippy.log
+          show_errors "cargo fmt" "${{ steps.fmt.outcome }}" ci-logs/fmt.log
+
+          printf '{"toolchain":"%s","commit":"%s","test":"%s","clippy":"%s","fmt":"%s","tests_passed":%s,"tests_failed":%s,"tests_ignored":%s}\n' \
+            "$toolchain" "${GITHUB_SHA::7}" \
+            "${{ steps.test.outcome }}" "${{ steps.clippy.outcome }}" "${{ steps.fmt.outcome }}" \
+            "$passed" "$failed" "$ignored" > ci-logs/summary.json
+
+      - name: Upload logs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-logs
+          path: ci-logs/
+          if-no-files-found: ignore
+          retention-days: 14
