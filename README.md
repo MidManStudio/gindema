@@ -4,8 +4,12 @@ Closed-source code/binary protection core **and** gameplay video/image poisoning
 
 ## Status
 
-Scaffold stage for `gindema-*` and `mirage-*`: crate structure is real, the
-logic inside each isn't written yet. `pixelflip-*` is real and working.
+Scaffold stage for `gindema-*`, `mirage-ffmpeg` and `mirage-cli`: crate
+structure is real, the logic inside each isn't written yet. `pixelflip-*` is
+real and working. `mirage-core` (pattern format and frame application) and
+`mirage-train` (offline training and evaluation against CLIP) are implemented
+and tested, but a trained pattern's effectiveness against the real CLIP
+checkpoint has not been measured yet; see `docs/mirage-train.md`.
 
 ## Toolchain: stable (1.100 at time of writing), not 1.75, 1.85 or 1.88
 
@@ -47,9 +51,9 @@ Protection core:
 - `crates/gindema-cli` - the distributable protection-core CLI
 
 Video/image poisoning (placeholder name "mirage", rename before shipping):
-- `crates/mirage-core` - perturbation algorithms
+- `crates/mirage-core` - pattern format and frame application (runtime side)
 - `crates/mirage-ffmpeg` - FFmpeg integration
-- `crates/mirage-train` - offline PGD-based training step that produces the perturbation pattern
+- `crates/mirage-train` - offline PGD training and evaluation of the perturbation pattern against CLIP
 - `crates/mirage-cli` - the distributable video-poisoning CLI
 
 Visual effects (unrelated to the anti-AI purpose, just a styling tool):

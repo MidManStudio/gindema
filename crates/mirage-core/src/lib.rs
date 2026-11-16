@@ -3,6 +3,10 @@
 // live in docs/mirage-core.md, section "lib.rs"
 // ============================================================================
 
-//! Adversarial perturbation algorithms: per-pixel random-gradient negative flips, frequency-domain noise.
+//! Runtime side of the video/image poisoning tooling. Loads the perturbation
+//! pattern that `mirage-train` produced offline and applies it to frames with
+//! plain CPU arithmetic: no ML framework, no model weights, no GPU.
 
-// TODO: scaffold stage only, not yet implemented.
+pub mod pattern;
+
+pub use pattern::{interp_taps, Pattern, PatternError, Tap, CHANNELS, MAGIC, VERSION};

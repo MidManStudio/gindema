@@ -42,9 +42,10 @@ pub struct Params {
 
 // Same constants as the hash() in pixelflip.html's JS, kept identical on
 // purpose: the browser tool and this crate should agree on Noise output
-// for the same inputs.
+// for the same inputs. (43_758.547 is the same f32 as the JS literal
+// 43758.5453; clippy asks for the shorter spelling.)
 fn hash(x: i64, y: i64) -> f32 {
-    let v = ((x as f32) * 12.9898 + (y as f32) * 78.233).sin() * 43758.5453;
+    let v = ((x as f32) * 12.9898 + (y as f32) * 78.233).sin() * 43_758.547;
     v - v.floor()
 }
 
@@ -53,7 +54,8 @@ fn rotate(x: f32, y: f32, angle_deg: f32) -> f32 {
     x * rad.cos() + y * rad.sin()
 }
 
-fn flips(x: u32, y: u32, w: u32, h: u32, p: &Params, r: u8, g: u8, b: u8) -> bool {
+fn flips(x: u32, y: u32, w: u32, h: u32, p: &Params, rgb: [u8; 3]) -> bool {
+    let [r, g, b] = rgb;
     let (x, y, w, h) = (x as f32, y as f32, w as f32, h as f32);
     let size = p.size.max(1.0);
     match p.pattern {
@@ -97,7 +99,7 @@ pub fn apply(img: &mut RgbImage, params: &Params) -> ImageResult<()> {
     for y in 0..h {
         for x in 0..w {
             let Rgb([r, g, b]) = *img.get_pixel(x, y);
-            if flips(x, y, w, h, params, r, g, b) {
+            if flips(x, y, w, h, params, [r, g, b]) {
                 img.put_pixel(
                     x,
                     y,
@@ -120,17 +122,28 @@ mod tests {
     #[test]
     fn checker_negates_roughly_half() {
         let mut img = RgbImage::from_pixel(64, 64, Rgb([10, 20, 30]));
-        let params = Params { pattern: Pattern::Checker, size: 8.0, blend: 1.0 };
+        let params = Params {
+            pattern: Pattern::Checker,
+            size: 8.0,
+            blend: 1.0,
+        };
         apply(&mut img, &params).unwrap();
         let negated = img.pixels().filter(|p| p.0 != [10, 20, 30]).count();
-        assert!(negated > 1500 && negated < 2600, "got {negated} negated pixels");
+        assert!(
+            negated > 1500 && negated < 2600,
+            "got {negated} negated pixels"
+        );
     }
 
     #[test]
     fn zero_blend_is_a_no_op() {
         let mut img = RgbImage::from_pixel(32, 32, Rgb([5, 5, 5]));
         let before = img.clone();
-        let params = Params { pattern: Pattern::Radial, size: 4.0, blend: 0.0 };
+        let params = Params {
+            pattern: Pattern::Radial,
+            size: 4.0,
+            blend: 0.0,
+        };
         apply(&mut img, &params).unwrap();
         assert_eq!(img, before);
     }

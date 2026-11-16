@@ -58,12 +58,23 @@ fn main() -> anyhow::Result<()> {
         PatternArg::Stripes => Pattern::Stripes { angle: cli.angle },
         PatternArg::Diagonal => Pattern::Diagonal,
         PatternArg::Radial => Pattern::Radial,
-        PatternArg::Noise => Pattern::Noise { threshold: cli.threshold / 100.0 },
-        PatternArg::Luminance => Pattern::Luminance { threshold: cli.threshold / 100.0 },
+        PatternArg::Noise => Pattern::Noise {
+            threshold: cli.threshold / 100.0,
+        },
+        PatternArg::Luminance => Pattern::Luminance {
+            threshold: cli.threshold / 100.0,
+        },
     };
 
     let mut img = image::open(&cli.input)?.to_rgb8();
-    apply(&mut img, &Params { pattern, size: cli.size, blend: cli.blend / 100.0 })?;
+    apply(
+        &mut img,
+        &Params {
+            pattern,
+            size: cli.size,
+            blend: cli.blend / 100.0,
+        },
+    )?;
     img.save(&cli.output)?;
 
     println!("wrote {}", cli.output.display());
