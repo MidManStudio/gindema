@@ -3,6 +3,15 @@ name: mirage-train bench
 
 on:
   workflow_dispatch:
+    inputs:
+      run_training:
+        description: 'Also run a real train/eval pass (downloads ~600 MB of CLIP weights plus sample images; slow)'
+        type: boolean
+        default: false
+      steps:
+        description: 'Training steps for the real run'
+        type: string
+        default: '60'
 
 jobs:
   build-and-smoke-test:
@@ -42,7 +51,7 @@ jobs:
         run: |
           set -o pipefail
           s=$(date +%s); rc=0
-          cargo test -p mirage-train 2>&1 | tee ci-logs/test.log || rc=$?
+          cargo test -p mirage-core -p mirage-train 2>&1 | tee ci-logs/test.log || rc=$?
           echo $(( $(date +%s) - s )) > ci-logs/test.secs
           exit $rc
 
@@ -52,18 +61,9 @@ jobs:
         run: |
           set -o pipefail
           s=$(date +%s); rc=0
-          cargo clippy -p mirage-train -- -D warnings 2>&1 | tee ci-logs/clippy.log || rc=$?
+          cargo clippy -p mirage-core -p mirage-train --all-targets -- -D warnings 2>&1 | tee ci-logs/clippy.log || rc=$?
           echo $(( $(date +%s) - s )) > ci-logs/clippy.secs
           exit $rc
-
-      # TODO: once mirage-train has a real implementation — pull a small
-      # CLIP checkpoint + a tiny sample image set, run the PGD loop at a
-      # reduced step count, and assert the resulting perturbation (a) stays
-      # within the L-infinity budget and (b) still shifts the CLIP
-      # embedding by more than some threshold after a JPEG re-encode
-      # round-trip. That's the real "benchmark." This job currently only
-      # proves the crate builds and its tests pass on the actual stable
-      # toolchain.
 
       - name: Job summary
         if: ${{ always() }}
@@ -118,8 +118,8 @@ jobs:
             echo
             echo "| Step | Result | Time |"
             echo "|---|---|---|"
-            echo "| cargo build --release | $(icon '${{ steps.build.outcome }}') | $(secs build) |"
-            echo "| cargo test | $(icon '${{ steps.test.outcome }}') | $(secs test) |"
+            echo "| cargo build --release (mirage-train) | $(icon '${{ steps.build.outcome }}') | $(secs build) |"
+            echo "| cargo test (mirage-core + mirage-train) | $(icon '${{ steps.test.outcome }}') | $(secs test) |"
             echo "| ↳ tests | ${passed} passed, ${failed} failed, ${ignored} ignored | |"
             echo "| cargo clippy -D warnings | $(icon '${{ steps.clippy.outcome }}') | $(secs clippy) |"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -142,3 +142,93 @@ jobs:
           path: ci-logs/
           if-no-files-found: ignore
           retention-days: 14
+
+  # Opt-in (run_training = true). Measures what the unit tests cannot: does a
+  # trained pattern actually move the real CLIP embedding, and does it survive
+  # JPEG compression better than a random pattern of the same budget?
+  train-smoke:
+    if: ${{ inputs.run_training }}
+    needs: build-and-smoke-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-gindema-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-gindema-
+
+      - name: Fetch CLIP weights and sample images
+        run: |
+          set -euo pipefail
+          mkdir -p data/images ci-logs
+          # Same repo and revision candle's own CLIP example loads.
+          curl -fL --retry 3 --retry-delay 5 -o data/model.safetensors \
+            "https://huggingface.co/openai/clip-vit-base-patch32/resolve/refs%2Fpr%2F15/model.safetensors"
+          # A few COCO val2017 photos; the run needs at least 6 to train and hold out 3.
+          for id in 000000000139 000000000285 000000000632 000000000724 000000000776 000000000785 000000000802 000000000872 000000000885 000000001000 000000039769; do
+            f="data/images/${id}.jpg"
+            curl -fsSL --retry 2 -o "$f" "http://images.cocodataset.org/val2017/${id}.jpg" \
+              || { echo "could not fetch ${id}"; rm -f "$f"; }
+          done
+          count=$(find data/images -name '*.jpg' -size +1k | wc -l)
+          echo "fetched ${count} images"
+          [ "$count" -ge 6 ] || { echo "need at least 6 sample images"; exit 1; }
+          ls -l data/model.safetensors
+
+      - name: Build release binary
+        run: cargo build -p mirage-train --release
+
+      - name: Train and evaluate
+        id: train
+        env:
+          STEPS: ${{ inputs.steps }}
+        run: |
+          set -o pipefail
+          case "$STEPS" in ''|*[!0-9]*) echo "steps must be a whole number, got '$STEPS'"; exit 1 ;; esac
+          s=$(date +%s); rc=0
+          # stdout (the evaluation JSON) goes to a file; stderr (progress) is shown and logged.
+          ./target/release/mirage-train train \
+            --weights data/model.safetensors --images data/images \
+            --out ci-logs/pattern.mirp --preview ci-logs/preview.png \
+            --summary-md ci-logs/summary.md --holdout 3 --steps "$STEPS" \
+            2>&1 >ci-logs/eval.json | tee ci-logs/train.log || rc=$?
+          echo $(( $(date +%s) - s )) > ci-logs/train.secs
+          exit $rc
+
+      - name: Job summary
+        if: ${{ always() }}
+        run: |
+          {
+            echo "## mirage-train real run"
+            echo
+            if [ -f ci-logs/train.secs ]; then echo "- **Training + evaluation time:** $(cat ci-logs/train.secs)s"; fi
+            if [ -f ci-logs/pattern.mirp ]; then echo "- **Pattern file:** $(stat -c %s ci-logs/pattern.mirp) bytes (artifact \`mirage-train-run\`)"; fi
+            echo
+            if [ -f ci-logs/summary.md ]; then cat ci-logs/summary.md; else echo "_No summary was produced; see the log below._"; fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ steps.train.outcome }}" = "failure" ]; then
+            {
+              echo
+              echo "<details open><summary>train: last 60 lines of output</summary>"
+              echo
+              echo '```'
+              tail -n 60 ci-logs/train.log 2>/dev/null || true
+              echo '```'
+              echo "</details>"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload run outputs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: mirage-train-run
+          path: ci-logs/
+          if-no-files-found: ignore
+          retention-days: 30
