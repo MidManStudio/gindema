@@ -91,14 +91,63 @@ fn train_then_eval_end_to_end() {
     assert!(stderr.contains("3 training images, 2 held out"), "{stderr}");
     assert!(stderr.contains("step     4/4"), "{stderr}");
     let stdout = String::from_utf8(out.stdout).unwrap();
-    assert!(stdout.trim().starts_with("{\"images\":2,"), "{stdout}");
+    // 3 training images (all evaluated in-sample) and 2 held out.
+    assert!(
+        stdout.trim().starts_with("{\"train\":{\"images\":3,"),
+        "{stdout}"
+    );
+    assert!(stdout.contains(",\"heldout\":{\"images\":2,"), "{stdout}");
 
     let pattern = Pattern::from_bytes(&std::fs::read(&pattern_path).unwrap()).unwrap();
     assert_eq!((pattern.width(), pattern.height()), (4, 4));
     assert!((pattern.epsilon() - 8.0 / 255.0).abs() < 1e-6);
     assert!(image::open(&preview).unwrap().width() == 256);
     let md = std::fs::read_to_string(&summary).unwrap();
-    assert!(md.contains("trained pattern") && md.contains("3"), "{md}");
+    assert!(
+        md.contains("#### Held-out images") && md.contains("#### Training images (in-sample)"),
+        "{md}"
+    );
+    assert!(md.contains("aspect-aware crop windows"), "{md}");
+
+    // The legacy window mode and skipping the in-sample evaluation still work.
+    let legacy = dir.join("legacy.mirp");
+    let out = run(&[
+        "train",
+        "--tiny",
+        "--weights",
+        s(&weights),
+        "--images",
+        s(&images),
+        "--out",
+        s(&legacy),
+        "--epsilon",
+        "8",
+        "--steps",
+        "2",
+        "--batch-size",
+        "2",
+        "--low-res",
+        "4",
+        "--holdout",
+        "1",
+        "--legacy-full-window",
+        "--jitter",
+        "0",
+        "--eval-train",
+        "0",
+    ]);
+    assert!(
+        out.status.success(),
+        "legacy train failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        stdout
+            .trim()
+            .starts_with("{\"train\":null,\"heldout\":{\"images\":1,"),
+        "{stdout}"
+    );
 
     let out = run(&[
         "eval",

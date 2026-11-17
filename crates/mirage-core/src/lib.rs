@@ -9,4 +9,6 @@
 
 pub mod pattern;
 
-pub use pattern::{interp_taps, Pattern, PatternError, Tap, CHANNELS, MAGIC, VERSION};
+pub use pattern::{
+    interp_taps, interp_taps_window, Pattern, PatternError, Tap, CHANNELS, MAGIC, VERSION,
+};

@@ -99,14 +99,24 @@ pub struct Tap {
 /// differentiable upsampling matrices from these same taps, so training and
 /// runtime stretch the pattern identically.
 pub fn interp_taps(src: usize, dst: usize) -> Vec<Tap> {
-    if src == 0 || dst == 0 {
+    interp_taps_window(src, dst, 0.0, 1.0)
+}
+
+/// Like [`interp_taps`], but only the window `[start, start + extent]` of the
+/// source (fractions of its length, `0.0..=1.0`) is stretched to `dst` samples.
+/// This is what an encoder that centre-crops a frame sees of a pattern that
+/// was stretched over the whole frame. Returns no taps for a zero size, a
+/// non-finite window, or a non-positive extent.
+pub fn interp_taps_window(src: usize, dst: usize, start: f64, extent: f64) -> Vec<Tap> {
+    if src == 0 || dst == 0 || !start.is_finite() || !extent.is_finite() || extent <= 0.0 {
         return Vec::new();
     }
-    let ratio = src as f64 / dst as f64;
     let last = (src - 1) as f64;
+    let origin = start * src as f64;
+    let span = extent * src as f64;
     (0..dst)
         .map(|i| {
-            let pos = ((i as f64 + 0.5) * ratio - 0.5).clamp(0.0, last);
+            let pos = (origin + (i as f64 + 0.5) * span / dst as f64 - 0.5).clamp(0.0, last);
             let lo = pos.floor() as usize;
             let hi = (lo + 1).min(src - 1);
             Tap {
@@ -327,6 +337,42 @@ mod tests {
         }
         assert!(interp_taps(0, 5).is_empty());
         assert!(interp_taps(5, 0).is_empty());
+    }
+
+    #[test]
+    fn full_window_equals_plain_taps() {
+        for (src, dst) in [(4, 4), (28, 224), (7, 3)] {
+            assert_eq!(
+                interp_taps(src, dst),
+                interp_taps_window(src, dst, 0.0, 1.0)
+            );
+        }
+    }
+
+    #[test]
+    fn centred_half_window_samples_the_middle_of_the_source() {
+        // Source [2, 6) of 8 samples stretched to 4: positions land exactly on 2, 3, 4, 5.
+        let taps = interp_taps_window(8, 4, 0.25, 0.5);
+        let los: Vec<usize> = taps.iter().map(|t| t.lo).collect();
+        assert_eq!(los, [2, 3, 4, 5]);
+        assert!(taps.iter().all(|t| t.w_hi.abs() < 1e-6));
+    }
+
+    #[test]
+    fn windows_past_the_edge_clamp_and_bad_windows_are_empty() {
+        let taps = interp_taps_window(5, 6, 0.9, 0.5);
+        assert_eq!(taps.len(), 6);
+        assert!(taps
+            .iter()
+            .all(|t| t.lo < 5 && t.hi < 5 && (0.0..=1.0).contains(&t.w_hi)));
+        for (start, extent) in [
+            (f64::NAN, 0.5),
+            (0.0, f64::INFINITY),
+            (0.0, 0.0),
+            (0.0, -1.0),
+        ] {
+            assert!(interp_taps_window(5, 6, start, extent).is_empty());
+        }
     }
 
     #[test]

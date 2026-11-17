@@ -15,6 +15,7 @@ use candle_nn::VarBuilder;
 use clap::{Args, Parser, Subcommand};
 use mirage_core::Pattern;
 use mirage_train::clip::{ClipVision, ClipVisionConfig};
+use mirage_train::data::CropWindow;
 use mirage_train::{data, eval, pgd};
 
 #[derive(Parser)]
@@ -71,6 +72,14 @@ struct TrainArgs {
     /// Gaussian noise during training, in 8-bit levels.
     #[arg(long, default_value_t = 2.5)]
     noise_std: f32,
+    /// Random scale/shift of each image's pattern window while training, as a
+    /// fraction of the window (0 disables).
+    #[arg(long, default_value_t = 0.1)]
+    jitter: f32,
+    /// Treat every training crop as if the pattern covered exactly the crop
+    /// (how training worked before aspect-aware windows); for A/B comparison.
+    #[arg(long)]
+    legacy_full_window: bool,
     /// Seed for everything random.
     #[arg(long, default_value_t = 0)]
     seed: u64,
@@ -78,6 +87,10 @@ struct TrainArgs {
     /// used to evaluate the result.
     #[arg(long, default_value_t = 0)]
     holdout: usize,
+    /// Also evaluate on this many training images in the same deployed
+    /// pipeline, to tell overfitting apart from a pipeline mismatch.
+    #[arg(long, default_value_t = 8)]
+    eval_train: usize,
     /// JPEG quality for the evaluation round trip.
     #[arg(long, default_value_t = 75)]
     jpeg_quality: u8,
@@ -123,6 +136,12 @@ fn load_model(weights: &Path, tiny: bool) -> Result<ClipVision> {
     Ok(ClipVision::new(vb, &cfg)?)
 }
 
+fn json_or_null(report: &Option<eval::EvalReport>) -> String {
+    report
+        .as_ref()
+        .map_or_else(|| "null".to_string(), eval::EvalReport::to_json)
+}
+
 fn run_train(args: TrainArgs) -> Result<()> {
     let all = data::list_images(&args.images)?;
     if args.holdout >= all.len() {
@@ -143,8 +162,15 @@ fn run_train(args: TrainArgs) -> Result<()> {
     let model = load_model(&args.weights, args.tiny)?;
     let size = model.image_size();
     let mut planar = Vec::with_capacity(train_paths.len());
+    let mut windows = Vec::with_capacity(train_paths.len());
     for path in train_paths {
-        planar.push(data::preprocess(&data::load_rgb(path)?, size as u32));
+        let (pixels, window) = data::preprocess_with_window(&data::load_rgb(path)?, size as u32);
+        planar.push(pixels);
+        windows.push(if args.legacy_full_window {
+            CropWindow::FULL
+        } else {
+            window
+        });
     }
     let images = data::stack_images(&planar, size, &device)?;
 
@@ -157,10 +183,11 @@ fn run_train(args: TrainArgs) -> Result<()> {
         step_size: args.step_size.map_or(epsilon / 16.0, |s| s * levels),
         low_res: args.low_res,
         noise_std: args.noise_std * levels,
+        jitter: args.jitter,
         seed: args.seed,
     };
     let log_every = args.log_every.max(1);
-    let outcome = pgd::train(&model, &images, &cfg, |log| {
+    let outcome = pgd::train(&model, &images, &windows, &cfg, |log| {
         if log.step % log_every == 0 || log.step + 1 == cfg.steps {
             eprintln!(
                 "step {:>5}/{}  loss {:.4}  mean cos {:.4}  step size {:.5}",
@@ -187,37 +214,58 @@ fn run_train(args: TrainArgs) -> Result<()> {
         eprintln!("wrote preview to {}", preview.display());
     }
 
-    let report = if held_paths.is_empty() {
-        None
-    } else {
-        Some(eval::evaluate(
+    let evaluate = |paths: &[PathBuf]| -> Result<Option<eval::EvalReport>> {
+        if paths.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(eval::evaluate(
             &model,
             &device,
-            held_paths,
+            paths,
             &outcome.pattern,
             args.jpeg_quality,
             args.seed,
-        )?)
+        )?))
     };
-    if let Some(report) = &report {
-        println!("{}", report.to_json());
-    }
+    let held_report = evaluate(held_paths)?;
+    let train_report = evaluate(&train_paths[..args.eval_train.min(train_paths.len())])?;
+    println!(
+        "{{\"train\":{},\"heldout\":{}}}",
+        json_or_null(&train_report),
+        json_or_null(&held_report)
+    );
+
     if let Some(path) = &args.summary_md {
+        let window_mode = if args.legacy_full_window {
+            "legacy (pattern treated as covering exactly the crop)".to_string()
+        } else {
+            format!("aspect-aware crop windows, jitter {}", args.jitter)
+        };
         let mut md = format!(
             "- **Training images:** {}\n- **Budget:** {} / 255, grid {}x{}, {} steps, batch {}\n\
-             - **Training-set mean cosine:** {:.4} (random start) -> {:.4} (trained)\n\n",
+             - **Pattern window:** {}\n\
+             - **Training-set mean cosine (crop pipeline, no JPEG):** {:.4} (random start) -> {:.4} (trained)\n\n",
             train_paths.len(),
             args.epsilon,
             args.low_res,
             args.low_res,
             args.steps,
             args.batch_size,
+            window_mode,
             outcome.initial_mean_cos,
             outcome.final_mean_cos
         );
-        match &report {
-            Some(report) => md.push_str(&report.to_markdown()),
-            None => md.push_str("_No held-out images, so no evaluation was run._\n"),
+        md.push_str("Both tables below use the deployed pipeline: pattern applied to the full-resolution frame, then (optionally) JPEG, then CLIP preprocessing.\n\n");
+        match &held_report {
+            Some(report) => {
+                md.push_str("#### Held-out images\n\n");
+                md.push_str(&report.to_markdown());
+            }
+            None => md.push_str("_No held-out images, so no held-out evaluation was run._\n"),
+        }
+        if let Some(report) = &train_report {
+            md.push_str("\n#### Training images (in-sample)\n\n");
+            md.push_str(&report.to_markdown());
         }
         std::fs::write(path, md).with_context(|| format!("writing {}", path.display()))?;
     }

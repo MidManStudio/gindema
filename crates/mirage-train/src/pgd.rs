@@ -6,23 +6,29 @@
 //! Projected gradient ascent for a universal perturbation.
 //!
 //! One low-resolution RGB grid `delta` is shared by every training image. Each
-//! step adds it (bilinearly stretched) to a batch, runs the CLIP tower, and
-//! moves `delta` along the sign of the gradient that lowers the cosine
-//! similarity between the perturbed embedding and that image's clean
-//! embedding, then clips `delta` back into `[-epsilon, +epsilon]`.
+//! step adds it to a batch, runs the CLIP tower, and moves `delta` along the
+//! sign of the gradient that lowers the cosine similarity between the
+//! perturbed embedding and that image's clean embedding, then clips `delta`
+//! back into `[-epsilon, +epsilon]`.
 //!
-//! Stretching is a matrix product `U_h * delta * U_w^T` with fixed
-//! interpolation matrices built from `mirage_core::interp_taps`. candle's own
-//! `upsample_bilinear2d` has no backward pass, and a matrix product both has
-//! one and guarantees training and runtime stretch the pattern identically.
+//! The grid is stretched to the model's resolution by a matrix product
+//! `U_h * delta * U_w^T`, with one pair of interpolation matrices per image.
+//! Each image gets its own *window* of the grid: at runtime the pattern covers
+//! the whole frame, but the encoder centre-crops, so for a non-square frame it
+//! only sees part of it (`data::CropWindow`). Training adds a little random
+//! scale and shift to that window so the pattern does not depend on exact
+//! alignment. candle's own `upsample_bilinear2d` has no backward pass, and a
+//! matrix product both has one and lets the weights come from
+//! `mirage_core::interp_taps_window`, the same math the runtime uses.
 //! Interpolation weights are non-negative and sum to 1, so clipping the small
 //! grid bounds the stretched pattern by the same epsilon.
 
 use anyhow::{bail, Context, Result};
 use candle_core::{Device, Tensor, Var, D};
-use mirage_core::{interp_taps, Pattern, CHANNELS};
+use mirage_core::{interp_taps_window, Pattern, CHANNELS};
 
 use crate::clip::{l2_normalize, normalize_pixels, ClipVision};
+use crate::data::CropWindow;
 use crate::rng::Rng;
 
 /// Training hyper-parameters. Pixel quantities are in `[0, 1]` units
@@ -42,7 +48,10 @@ pub struct TrainConfig {
     /// Standard deviation of Gaussian noise added to perturbed inputs while
     /// training, a cheap stand-in for compression noise.
     pub noise_std: f32,
-    /// Seed for initial pattern, batch order and noise.
+    /// Random scale and shift applied to each image's pattern window every
+    /// step, as a fraction of the window (0.1 = up to about 10%). 0 disables.
+    pub jitter: f32,
+    /// Seed for initial pattern, batch order, jitter and noise.
     pub seed: u64,
 }
 
@@ -56,6 +65,7 @@ impl Default for TrainConfig {
             step_size: epsilon / 16.0,
             low_res: 28,
             noise_std: 0.01,
+            jitter: 0.1,
             seed: 0,
         }
     }
@@ -71,6 +81,9 @@ impl TrainConfig {
         }
         if !(self.noise_std.is_finite() && self.noise_std >= 0.0) {
             bail!("noise_std must be non-negative, got {}", self.noise_std);
+        }
+        if !(self.jitter.is_finite() && (0.0..=0.5).contains(&self.jitter)) {
+            bail!("jitter must be in [0, 0.5], got {}", self.jitter);
         }
         if self.steps == 0 || self.batch_size == 0 || self.low_res == 0 {
             bail!("steps, batch_size and low_res must all be at least 1");
@@ -106,37 +119,81 @@ pub struct TrainOutcome {
     pub history: Vec<StepLog>,
 }
 
-/// Dense `(dst, src)` linear-interpolation matrix from `interp_taps`.
-pub fn interp_matrix(src: usize, dst: usize, device: &Device) -> candle_core::Result<Tensor> {
-    let mut m = vec![0f32; dst * src];
-    for (i, tap) in interp_taps(src, dst).iter().enumerate() {
-        m[i * src + tap.lo] += 1.0 - tap.w_hi;
-        m[i * src + tap.hi] += tap.w_hi;
-    }
-    Tensor::from_vec(m, (dst, src), device)
-}
-
-/// Differentiable bilinear stretch of a `(1, 3, h, w)` grid to `(1, 3, S, S)`.
+/// Differentiable stretch of a `(1, 3, low, low)` grid to `(B, 3, S, S)`, one
+/// window of the grid per image.
 pub struct Upsampler {
-    up_h: Tensor,
-    up_w_t: Tensor,
+    low: usize,
+    size: usize,
+    device: Device,
 }
 
 impl Upsampler {
-    /// Builds the interpolation matrices for a `low` x `low` grid stretched to
-    /// `size` x `size`.
-    pub fn new(low: usize, size: usize, device: &Device) -> candle_core::Result<Self> {
-        Ok(Self {
-            up_h: interp_matrix(low, size, device)?,
-            up_w_t: interp_matrix(low, size, device)?.t()?.contiguous()?,
-        })
+    /// Stretches a `low` x `low` grid to `size` x `size`.
+    pub fn new(low: usize, size: usize, device: &Device) -> Self {
+        Self {
+            low,
+            size,
+            device: device.clone(),
+        }
     }
 
-    /// Stretches `delta`; gradients flow back to it.
-    pub fn apply(&self, delta: &Tensor) -> candle_core::Result<Tensor> {
-        self.up_h
-            .broadcast_matmul(delta)?
-            .broadcast_matmul(&self.up_w_t)
+    /// Stacked interpolation matrices: `(B, 1, S, low)` for rows and
+    /// `(B, 1, low, S)` (already transposed) for columns.
+    fn matrices(&self, windows: &[CropWindow]) -> candle_core::Result<(Tensor, Tensor)> {
+        let (low, size, b) = (self.low, self.size, windows.len());
+        let mut rows = vec![0f32; b * size * low];
+        let mut cols = vec![0f32; b * low * size];
+        for (n, w) in windows.iter().enumerate() {
+            for (i, tap) in interp_taps_window(low, size, w.y0, w.y_extent)
+                .iter()
+                .enumerate()
+            {
+                rows[(n * size + i) * low + tap.lo] += 1.0 - tap.w_hi;
+                rows[(n * size + i) * low + tap.hi] += tap.w_hi;
+            }
+            for (j, tap) in interp_taps_window(low, size, w.x0, w.x_extent)
+                .iter()
+                .enumerate()
+            {
+                cols[(n * low + tap.lo) * size + j] += 1.0 - tap.w_hi;
+                cols[(n * low + tap.hi) * size + j] += tap.w_hi;
+            }
+        }
+        Ok((
+            Tensor::from_vec(rows, (b, 1, size, low), &self.device)?,
+            Tensor::from_vec(cols, (b, 1, low, size), &self.device)?,
+        ))
+    }
+
+    /// Stretches `delta` once per window; gradients flow back to `delta`.
+    pub fn apply(&self, delta: &Tensor, windows: &[CropWindow]) -> candle_core::Result<Tensor> {
+        let (rows, cols) = self.matrices(windows)?;
+        rows.broadcast_matmul(delta)?.broadcast_matmul(&cols)
+    }
+}
+
+/// Adds random scale and shift to one axis of a window, keeping it inside `[0, 1]`.
+fn jitter_axis(start: f64, extent: f64, jitter: f32, rng: &mut Rng) -> (f64, f64) {
+    let scale = 1.0 + f64::from(rng.uniform(-jitter, jitter));
+    let new_extent = (extent * scale).clamp(0.05, 1.0);
+    let shift = f64::from(rng.uniform(-jitter, jitter)) * extent;
+    let centre = start + extent / 2.0 + shift;
+    let new_start = (centre - new_extent / 2.0).clamp(0.0, 1.0 - new_extent);
+    (new_start, new_extent)
+}
+
+/// A randomly scaled and shifted copy of `window`; unchanged when `jitter` is 0.
+fn jittered(window: CropWindow, jitter: f32, rng: &mut Rng) -> CropWindow {
+    if jitter <= 0.0 {
+        return window;
+    }
+    let (x0, x_extent) = jitter_axis(window.x0, window.x_extent, jitter, rng);
+    let (y0, y_extent) = jitter_axis(window.y0, window.y_extent, jitter, rng);
+    CropWindow {
+        x0,
+        x_extent,
+        y0,
+        y_extent,
     }
 }
 
@@ -168,24 +225,25 @@ pub fn embed_all(model: &ClipVision, images: &Tensor, batch: usize) -> candle_co
 }
 
 /// Mean cosine between the embeddings of `images + stretched delta` and
-/// `clean`, over every image, without noise.
+/// `clean`, over every image, without noise or jitter.
 pub fn mean_cosine(
     model: &ClipVision,
     images: &Tensor,
     clean: &Tensor,
     delta: &Tensor,
+    windows: &[CropWindow],
     up: &Upsampler,
     batch: usize,
 ) -> candle_core::Result<f32> {
     let n = images.dim(0)?;
-    let delta_up = up.apply(delta)?;
     let mut total = 0f32;
     let mut start = 0;
     while start < n {
         let len = batch.max(1).min(n - start);
         let x = images.narrow(0, start, len)?;
         let e = clean.narrow(0, start, len)?;
-        let adv = x.broadcast_add(&delta_up)?.clamp(0f32, 1f32)?;
+        let delta_up = up.apply(delta, &windows[start..start + len])?;
+        let adv = (&x + &delta_up)?.clamp(0f32, 1f32)?;
         let feats = l2_normalize(&model.forward(&normalize_pixels(&adv)?)?)?;
         total += (&feats * &e)?.sum_all()?.to_scalar::<f32>()?;
         start += len;
@@ -194,10 +252,14 @@ pub fn mean_cosine(
 }
 
 /// Trains a universal perturbation against `model` on `images`
-/// `(N, 3, S, S)` in `[0, 1]`. `on_step` is called after every step.
+/// `(N, 3, S, S)` in `[0, 1]`. `windows[i]` is the part of a frame-wide
+/// pattern that image `i`'s crop shows (`CropWindow::FULL` if the pattern is
+/// to be treated as covering exactly the crop). `on_step` is called after
+/// every step.
 pub fn train(
     model: &ClipVision,
     images: &Tensor,
+    windows: &[CropWindow],
     cfg: &TrainConfig,
     mut on_step: impl FnMut(&StepLog),
 ) -> Result<TrainOutcome> {
@@ -210,10 +272,13 @@ pub fn train(
     if n == 0 {
         bail!("no training images");
     }
+    if windows.len() != n {
+        bail!("{} images but {} crop windows", n, windows.len());
+    }
     let device = images.device().clone();
     let low = cfg.low_res;
     let batch = cfg.batch_size.min(n);
-    let up = Upsampler::new(low, size, &device)?;
+    let up = Upsampler::new(low, size, &device);
     let clean = embed_all(model, images, batch)?;
 
     let mut rng = Rng::new(cfg.seed);
@@ -221,7 +286,15 @@ pub fn train(
         .map(|_| rng.uniform(-cfg.epsilon, cfg.epsilon))
         .collect();
     let delta = Var::from_tensor(&Tensor::from_vec(init, (1, CHANNELS, low, low), &device)?)?;
-    let initial_mean_cos = mean_cosine(model, images, &clean, delta.as_tensor(), &up, batch)?;
+    let initial_mean_cos = mean_cosine(
+        model,
+        images,
+        &clean,
+        delta.as_tensor(),
+        windows,
+        &up,
+        batch,
+    )?;
 
     let mut order: Vec<usize> = (0..n).collect();
     rng.shuffle(&mut order);
@@ -235,15 +308,19 @@ pub fn train(
                 rng.shuffle(&mut order);
                 cursor = 0;
             }
-            picked.push(order[cursor] as u32);
+            picked.push(order[cursor]);
             cursor += 1;
         }
-        let idx = Tensor::from_vec(picked, batch, &device)?;
+        let batch_windows: Vec<CropWindow> = picked
+            .iter()
+            .map(|&i| jittered(windows[i], cfg.jitter, &mut rng))
+            .collect();
+        let idx = Tensor::from_vec(picked.iter().map(|&i| i as u32).collect(), batch, &device)?;
         let x = images.index_select(&idx, 0)?;
         let e = clean.index_select(&idx, 0)?;
 
-        let delta_up = up.apply(delta.as_tensor())?;
-        let mut adv = x.broadcast_add(&delta_up)?.clamp(0f32, 1f32)?;
+        let delta_up = up.apply(delta.as_tensor(), &batch_windows)?;
+        let mut adv = (&x + &delta_up)?.clamp(0f32, 1f32)?;
         if cfg.noise_std > 0.0 {
             let noise: Vec<f32> = (0..batch * 3 * size * size)
                 .map(|_| rng.gaussian() * cfg.noise_std)
@@ -280,7 +357,15 @@ pub fn train(
         history.push(log);
     }
 
-    let final_mean_cos = mean_cosine(model, images, &clean, delta.as_tensor(), &up, batch)?;
+    let final_mean_cos = mean_cosine(
+        model,
+        images,
+        &clean,
+        delta.as_tensor(),
+        windows,
+        &up,
+        batch,
+    )?;
     let chw = delta.as_tensor().flatten_all()?.to_vec1::<f32>()?;
     Ok(TrainOutcome {
         pattern: grid_to_pattern(&chw, low, low, cfg.epsilon)?,
@@ -307,38 +392,119 @@ mod tests {
         Tensor::from_vec(flat, (n, 3, size, size), &Device::Cpu).unwrap()
     }
 
-    #[test]
-    fn matrix_stretch_matches_the_runtime_upsampler() {
-        let low = 5;
-        let size = 32;
-        let mut rng = Rng::new(11);
-        let grid: Vec<f32> = (0..3 * low * low)
-            .map(|_| rng.uniform(-0.03, 0.03))
-            .collect();
+    fn random_grid(low: usize, eps: f32, seed: u64) -> (Vec<f32>, Tensor) {
+        let mut rng = Rng::new(seed);
+        let grid: Vec<f32> = (0..3 * low * low).map(|_| rng.uniform(-eps, eps)).collect();
         let tensor = Tensor::from_vec(grid.clone(), (1, 3, low, low), &Device::Cpu).unwrap();
-        let stretched = Upsampler::new(low, size, &Device::Cpu)
-            .unwrap()
-            .apply(&tensor)
-            .unwrap()
-            .flatten_all()
-            .unwrap()
-            .to_vec1::<f32>()
-            .unwrap();
+        (grid, tensor)
+    }
 
-        let pattern = grid_to_pattern(&grid, low, low, 0.03).unwrap();
-        let runtime = pattern.upsample(size, size);
+    fn flat(t: &Tensor) -> Vec<f32> {
+        t.flatten_all().unwrap().to_vec1::<f32>().unwrap()
+    }
+
+    #[test]
+    fn full_window_stretch_matches_the_runtime_upsampler() {
+        let (low, size) = (5, 32);
+        let (grid, tensor) = random_grid(low, 0.03, 11);
+        let stretched = flat(
+            &Upsampler::new(low, size, &Device::Cpu)
+                .apply(&tensor, &[CropWindow::FULL])
+                .unwrap(),
+        );
+        let runtime = grid_to_pattern(&grid, low, low, 0.03)
+            .unwrap()
+            .upsample(size, size);
         for c in 0..3 {
             for y in 0..size {
                 for x in 0..size {
                     let a = stretched[c * size * size + y * size + x];
                     let b = runtime[(y * size + x) * 3 + c];
-                    assert!(
-                        (a - b).abs() < 1e-5,
-                        "mismatch at c={c} y={y} x={x}: {a} vs {b}"
-                    );
+                    assert!((a - b).abs() < 1e-5, "c={c} y={y} x={x}: {a} vs {b}");
                 }
             }
         }
+    }
+
+    #[test]
+    fn windowed_stretch_equals_cropping_the_runtime_pattern() {
+        // A pattern stretched over a 32x32 frame, centre-cropped to 16x16 (window
+        // 0.25..0.75 on both axes), must equal the windowed training stretch.
+        let (low, size) = (5, 16);
+        let (grid, tensor) = random_grid(low, 0.03, 12);
+        let window = CropWindow {
+            x0: 0.25,
+            x_extent: 0.5,
+            y0: 0.25,
+            y_extent: 0.5,
+        };
+        let stretched = flat(
+            &Upsampler::new(low, size, &Device::Cpu)
+                .apply(&tensor, &[window])
+                .unwrap(),
+        );
+        let frame = 32;
+        let runtime = grid_to_pattern(&grid, low, low, 0.03)
+            .unwrap()
+            .upsample(frame, frame);
+        for c in 0..3 {
+            for y in 0..size {
+                for x in 0..size {
+                    let a = stretched[c * size * size + y * size + x];
+                    let b = runtime[((y + 8) * frame + (x + 8)) * 3 + c];
+                    assert!((a - b).abs() < 1e-5, "c={c} y={y} x={x}: {a} vs {b}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn each_image_in_a_batch_gets_its_own_window() {
+        let (low, size) = (4, 8);
+        let (_, tensor) = random_grid(low, 0.03, 13);
+        let narrow = CropWindow {
+            x0: 0.3,
+            x_extent: 0.4,
+            y0: 0.1,
+            y_extent: 0.8,
+        };
+        let up = Upsampler::new(low, size, &Device::Cpu);
+        let both = up.apply(&tensor, &[CropWindow::FULL, narrow]).unwrap();
+        assert_eq!(both.dims(), &[2, 3, size, size]);
+        let both = flat(&both);
+        let half = 3 * size * size;
+        let full_alone = flat(&up.apply(&tensor, &[CropWindow::FULL]).unwrap());
+        let narrow_alone = flat(&up.apply(&tensor, &[narrow]).unwrap());
+        assert_eq!(&both[..half], &full_alone[..]);
+        assert_eq!(&both[half..], &narrow_alone[..]);
+        assert_ne!(full_alone, narrow_alone);
+    }
+
+    #[test]
+    fn jitter_keeps_windows_valid_and_zero_jitter_is_identity() {
+        let base = CropWindow {
+            x0: 0.125,
+            x_extent: 0.75,
+            y0: 0.0,
+            y_extent: 1.0,
+        };
+        let mut rng = Rng::new(5);
+        assert_eq!(jittered(base, 0.0, &mut rng), base);
+        let mut moved = false;
+        for _ in 0..500 {
+            let w = jittered(base, 0.3, &mut rng);
+            moved |= w != base;
+            for (start, extent) in [(w.x0, w.x_extent), (w.y0, w.y_extent)] {
+                assert!((0.05..=1.0).contains(&extent), "{w:?}");
+                assert!(start >= 0.0 && start + extent <= 1.0 + 1e-12, "{w:?}");
+            }
+        }
+        assert!(moved);
+        let again = |seed| {
+            let mut r = Rng::new(seed);
+            jittered(base, 0.2, &mut r)
+        };
+        assert_eq!(again(9), again(9));
     }
 
     #[test]
@@ -355,21 +521,26 @@ mod tests {
         }
     }
 
-    #[test]
-    fn training_lowers_similarity_within_the_budget() {
-        let model = tiny_model(21);
-        let images = synthetic_images(6, 32, 4);
-        let cfg = TrainConfig {
+    fn small_config() -> TrainConfig {
+        TrainConfig {
             epsilon: 0.1,
             steps: 30,
             batch_size: 3,
             step_size: 0.02,
             low_res: 4,
             noise_std: 0.0,
+            jitter: 0.0,
             seed: 9,
-        };
+        }
+    }
+
+    #[test]
+    fn training_lowers_similarity_within_the_budget() {
+        let model = tiny_model(21);
+        let images = synthetic_images(6, 32, 4);
+        let windows = vec![CropWindow::FULL; 6];
         let mut seen = 0;
-        let out = train(&model, &images, &cfg, |_| seen += 1).unwrap();
+        let out = train(&model, &images, &windows, &small_config(), |_| seen += 1).unwrap();
         assert_eq!(seen, 30);
         assert_eq!(out.history.len(), 30);
         assert!(
@@ -383,20 +554,47 @@ mod tests {
     }
 
     #[test]
+    fn training_with_cropped_windows_and_jitter_still_works() {
+        let model = tiny_model(21);
+        let images = synthetic_images(6, 32, 4);
+        let wide = CropWindow {
+            x0: 0.125,
+            x_extent: 0.75,
+            y0: 0.0,
+            y_extent: 1.0,
+        };
+        let windows = vec![wide; 6];
+        let cfg = TrainConfig {
+            jitter: 0.1,
+            ..small_config()
+        };
+        let out = train(&model, &images, &windows, &cfg, |_| {}).unwrap();
+        assert!(
+            out.final_mean_cos < out.initial_mean_cos - 1e-3,
+            "initial {} final {}",
+            out.initial_mean_cos,
+            out.final_mean_cos
+        );
+        assert!(out.pattern.data().iter().all(|v| v.abs() <= 0.1 + 1e-6));
+    }
+
+    #[test]
     fn training_is_repeatable_from_a_seed() {
         let model = tiny_model(21);
         let images = synthetic_images(4, 32, 4);
+        let windows = vec![CropWindow::FULL; 4];
         let cfg = TrainConfig {
             epsilon: 0.05,
             steps: 5,
             batch_size: 2,
             step_size: 0.01,
-            low_res: 4,
             noise_std: 0.01,
+            jitter: 0.1,
             seed: 3,
+            ..small_config()
         };
-        let a = train(&model, &images, &cfg, |_| {}).unwrap();
-        let b = train(&model, &images, &cfg, |_| {}).unwrap();
+        let a = train(&model, &images, &windows, &cfg, |_| {}).unwrap();
+        let b = train(&model, &images, &windows, &cfg, |_| {}).unwrap();
         assert_eq!(a.pattern, b.pattern);
     }
 
@@ -404,10 +602,10 @@ mod tests {
     fn rejects_bad_inputs() {
         let model = tiny_model(21);
         let images = synthetic_images(2, 32, 4);
+        let windows = vec![CropWindow::FULL; 2];
         let good = TrainConfig {
-            low_res: 4,
             steps: 1,
-            ..TrainConfig::default()
+            ..small_config()
         };
         for bad in [
             TrainConfig {
@@ -427,6 +625,14 @@ mod tests {
                 ..good.clone()
             },
             TrainConfig {
+                jitter: -0.1,
+                ..good.clone()
+            },
+            TrainConfig {
+                jitter: 0.9,
+                ..good.clone()
+            },
+            TrainConfig {
                 steps: 0,
                 ..good.clone()
             },
@@ -439,9 +645,10 @@ mod tests {
                 ..good.clone()
             },
         ] {
-            assert!(train(&model, &images, &bad, |_| {}).is_err());
+            assert!(train(&model, &images, &windows, &bad, |_| {}).is_err());
         }
         let wrong_size = synthetic_images(2, 16, 4);
-        assert!(train(&model, &wrong_size, &good, |_| {}).is_err());
+        assert!(train(&model, &wrong_size, &windows, &good, |_| {}).is_err());
+        assert!(train(&model, &images, &windows[..1], &good, |_| {}).is_err());
     }
 }

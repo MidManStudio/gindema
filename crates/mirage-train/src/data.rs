@@ -45,16 +45,59 @@ pub fn load_rgb(path: &Path) -> Result<RgbImage> {
         .to_rgb8())
 }
 
+/// Which part of a frame-wide pattern the encoder sees after preprocessing.
+/// A pattern is stretched over the *whole* frame at runtime, but CLIP-style
+/// preprocessing centre-crops, so for a non-square frame the encoder only sees
+/// a window of it. Coordinates are fractions of the original frame, `0..=1`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CropWindow {
+    /// Left edge of the visible window.
+    pub x0: f64,
+    /// Width of the visible window.
+    pub x_extent: f64,
+    /// Top edge of the visible window.
+    pub y0: f64,
+    /// Height of the visible window.
+    pub y_extent: f64,
+}
+
+impl CropWindow {
+    /// The whole frame is visible (a square frame, or the old assumption that
+    /// the pattern covers exactly the cropped image).
+    pub const FULL: Self = Self {
+        x0: 0.0,
+        x_extent: 1.0,
+        y0: 0.0,
+        y_extent: 1.0,
+    };
+}
+
+/// Resize target and crop origin shared by `preprocess` and `crop_window`, so
+/// the pixels and the pattern window can never disagree.
+fn geometry(w: u32, h: u32, size: u32) -> (u32, u32, u32, u32) {
+    let scale = f64::from(size) / f64::from(w.min(h));
+    let new_w = ((f64::from(w) * scale).round() as u32).max(size);
+    let new_h = ((f64::from(h) * scale).round() as u32).max(size);
+    (new_w, new_h, (new_w - size) / 2, (new_h - size) / 2)
+}
+
+/// The part of a `w` x `h` frame that `preprocess(.., size)` keeps.
+pub fn crop_window(w: u32, h: u32, size: u32) -> CropWindow {
+    let (new_w, new_h, x0, y0) = geometry(w, h, size);
+    CropWindow {
+        x0: f64::from(x0) / f64::from(new_w),
+        x_extent: f64::from(size) / f64::from(new_w),
+        y0: f64::from(y0) / f64::from(new_h),
+        y_extent: f64::from(size) / f64::from(new_h),
+    }
+}
+
 /// Resizes the shorter side to `size`, centre-crops to `size` x `size`, and
 /// returns planar CHW floats in `[0, 1]`.
 pub fn preprocess(img: &RgbImage, size: u32) -> Vec<f32> {
     let (w, h) = img.dimensions();
-    let scale = f64::from(size) / f64::from(w.min(h));
-    let new_w = ((f64::from(w) * scale).round() as u32).max(size);
-    let new_h = ((f64::from(h) * scale).round() as u32).max(size);
+    let (new_w, new_h, x0, y0) = geometry(w, h, size);
     let resized = image::imageops::resize(img, new_w, new_h, FilterType::CatmullRom);
-    let x0 = (new_w - size) / 2;
-    let y0 = (new_h - size) / 2;
     let cropped = image::imageops::crop_imm(&resized, x0, y0, size, size).to_image();
 
     let s = size as usize;
@@ -65,6 +108,12 @@ pub fn preprocess(img: &RgbImage, size: u32) -> Vec<f32> {
         }
     }
     out
+}
+
+/// `preprocess` plus the window of a frame-wide pattern that the crop shows.
+pub fn preprocess_with_window(img: &RgbImage, size: u32) -> (Vec<f32>, CropWindow) {
+    let (w, h) = img.dimensions();
+    (preprocess(img, size), crop_window(w, h, size))
 }
 
 /// Stacks preprocessed images into one `(N, 3, S, S)` tensor.
@@ -122,6 +171,34 @@ mod tests {
             "left edge not blue, right edge blue"
         );
         assert!(out.iter().all(|v| (0.0..=1.0).contains(v)));
+    }
+
+    #[test]
+    fn crop_window_matches_what_preprocess_keeps() {
+        assert_eq!(crop_window(8, 8, 8), CropWindow::FULL);
+        assert_eq!(crop_window(100, 100, 32), CropWindow::FULL);
+
+        // 40x20 -> 16x8 -> crop x in 4..12: starts a quarter in, half as wide.
+        let wide = crop_window(40, 20, 8);
+        assert_eq!((wide.x0, wide.x_extent), (0.25, 0.5));
+        assert_eq!((wide.y0, wide.y_extent), (0.0, 1.0));
+
+        // 20x40 is the same, transposed.
+        let tall = crop_window(20, 40, 8);
+        assert_eq!((tall.y0, tall.y_extent), (0.25, 0.5));
+        assert_eq!((tall.x0, tall.x_extent), (0.0, 1.0));
+
+        // A typical 640x480 photo at 224 keeps roughly the central 75%
+        // horizontally (the integer pixel crop makes it 224 of 299).
+        let photo = crop_window(640, 480, 224);
+        assert!((photo.x_extent - 0.75).abs() < 5e-3, "{photo:?}");
+        assert!((photo.x0 - 0.125).abs() < 5e-3, "{photo:?}");
+        assert_eq!((photo.y0, photo.y_extent), (0.0, 1.0));
+
+        let img = RgbImage::from_pixel(40, 20, Rgb([1, 2, 3]));
+        let (pixels, window) = preprocess_with_window(&img, 8);
+        assert_eq!(pixels.len(), 3 * 64);
+        assert_eq!(window, wide);
     }
 
     #[test]

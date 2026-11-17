@@ -18,18 +18,19 @@ Earlier scaffold notes also floated per-pixel random-gradient flips and DCT-doma
 - `Pattern::new` validates size, epsilon, length, finiteness and the `[-epsilon, +epsilon]` bound; every other constructor goes through it, so a `Pattern` is always valid.
 - File format `MIRP` v1, little-endian: magic `MIRP` (4 bytes), version `u16` (= 1), channels `u16` (= 3), width `u32`, height `u32`, epsilon `f32`, then `width * height * 3` `f32` values, row-major, interleaved RGB. Total `20 + 12 * width * height` bytes. `from_bytes` rejects bad magic, other versions, other channel counts, wrong lengths, NaN/inf and out-of-bound values.
 - `interp_taps(src, dst)`: 1-D linear interpolation weights (half-pixel centres, clamped edges). All weights are non-negative and sum to 1, so a stretched pattern can never exceed the grid's own range, and clipping the small grid to epsilon bounds every stretched pixel by the same epsilon.
+- `interp_taps_window(src, dst, start, extent)`: the same, but only a window of the source (fractions of its length) is stretched. This is what an encoder that centre-crops a frame sees of a pattern stretched over the whole frame; `mirage-train` uses it to model that crop. `interp_taps` is the full window.
 - `Pattern::upsample(w, h)`: the stretched pattern as floats.
 - `Pattern::apply_rgb8(frame, w, h)`: adds the stretched pattern to an interleaved RGB8 frame in place, rounding to the nearest level and clamping to `0..=255`. A channel changes by at most `round(epsilon * 255)` levels.
 
-**Design notes:** `mirage-train` builds its differentiable upsampling matrices from the same `interp_taps`, and a test there asserts the matrix path and `Pattern::upsample` agree, so training and runtime stretch the pattern identically.
+**Design notes:** `mirage-train` builds its differentiable upsampling matrices from the same taps, and tests there assert the matrix path agrees with `Pattern::upsample`, both for the full frame and for a centre-cropped window, so training and runtime stretch the pattern identically.
 
 **Known limits:**
-- The pattern is stretched over the whole frame. CLIP-style preprocessing resizes the shorter side and centre-crops, so for non-square frames the encoder sees only the central part of the pattern. Training does not model this yet.
+- The pattern is stretched over the whole frame. CLIP-style preprocessing resizes the shorter side and centre-crops, so for non-square frames the encoder sees only the central part of the pattern. `mirage-train` models this (aspect-aware windows); the runtime itself is unchanged.
 - `apply_rgb8` is a plain per-pixel bilinear loop: RGB8 only, no SIMD, no cached rows. Not integrated with `mirage-ffmpeg` yet.
 
 ## CI and Workflows
 
-See `.github/workflows/ci.yml` (workspace-wide, workflow_dispatch only). `cargo test -p mirage-core` runs 10 unit tests covering the format, validation, interpolation and application.
+See `.github/workflows/ci.yml` (workspace-wide, workflow_dispatch only). `cargo test -p mirage-core` runs 13 unit tests covering the format, validation, interpolation (including windows) and application.
 
 ## Fixes and Problems
 
