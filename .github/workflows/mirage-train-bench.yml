@@ -5,13 +5,25 @@ on:
   workflow_dispatch:
     inputs:
       run_training:
-        description: 'Also run a real train/eval pass (downloads ~600 MB of CLIP weights plus sample images; slow)'
+        description: 'Also run real train/eval passes (downloads ~600 MB of CLIP weights and ~780 MB of COCO val2017; takes a while)'
         type: boolean
         default: false
-      steps:
-        description: 'Training steps for the real run'
+      images:
+        description: 'How many COCO val2017 photos to use (first N by file name, at least 30)'
         type: string
-        default: '60'
+        default: '150'
+      holdout:
+        description: 'How many of them to keep out of training for evaluation'
+        type: string
+        default: '40'
+      steps:
+        description: 'Training steps per run'
+        type: string
+        default: '300'
+      batch_size:
+        description: 'Images per training step'
+        type: string
+        default: '8'
 
 jobs:
   build-and-smoke-test:
@@ -144,13 +156,21 @@ jobs:
           retention-days: 14
 
   # Opt-in (run_training = true). Measures what the unit tests cannot: does a
-  # trained pattern actually move the real CLIP embedding, and does it survive
-  # JPEG compression better than a random pattern of the same budget?
+  # trained pattern move the real CLIP embedding of images it never saw, in the
+  # deployed pipeline (pattern on the full frame, then JPEG), better than a
+  # random pattern of the same budget? Two runs on the same data and seed
+  # compare the old assumption (pattern covers exactly the crop) with
+  # aspect-aware windows plus jitter.
   train-smoke:
     if: ${{ inputs.run_training }}
     needs: build-and-smoke-test
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
+    env:
+      IMAGES: ${{ inputs.images }}
+      HOLDOUT: ${{ inputs.holdout }}
+      STEPS: ${{ inputs.steps }}
+      BATCH_SIZE: ${{ inputs.batch_size }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -163,6 +183,17 @@ jobs:
           key: ${{ runner.os }}-cargo-gindema-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-gindema-
 
+      - name: Check inputs
+        run: |
+          for v in IMAGES HOLDOUT STEPS BATCH_SIZE; do
+            case "${!v}" in ''|*[!0-9]*) echo "$v must be a whole number, got '${!v}'"; exit 1 ;; esac
+          done
+          [ "$IMAGES" -ge 30 ] || { echo "images must be at least 30"; exit 1; }
+          [ "$IMAGES" -le 5000 ] || { echo "images must be at most 5000 (the size of val2017)"; exit 1; }
+          [ "$HOLDOUT" -lt "$IMAGES" ] || { echo "holdout must be smaller than images"; exit 1; }
+          [ $(( IMAGES - HOLDOUT )) -ge 8 ] || { echo "need at least 8 training images"; exit 1; }
+          [ "$STEPS" -ge 1 ] && [ "$BATCH_SIZE" -ge 1 ] || { echo "steps and batch_size must be at least 1"; exit 1; }
+
       - name: Fetch CLIP weights and sample images
         run: |
           set -euo pipefail
@@ -170,59 +201,88 @@ jobs:
           # Same repo and revision candle's own CLIP example loads.
           curl -fL --retry 3 --retry-delay 5 -o data/model.safetensors \
             "https://huggingface.co/openai/clip-vit-base-patch32/resolve/refs%2Fpr%2F15/model.safetensors"
-          # A few COCO val2017 photos; the run needs at least 6 to train and hold out 3.
-          for id in 000000000139 000000000285 000000000632 000000000724 000000000776 000000000785 000000000802 000000000872 000000000885 000000001000 000000039769; do
-            f="data/images/${id}.jpg"
-            curl -fsSL --retry 2 -o "$f" "http://images.cocodataset.org/val2017/${id}.jpg" \
-              || { echo "could not fetch ${id}"; rm -f "$f"; }
-          done
-          count=$(find data/images -name '*.jpg' -size +1k | wc -l)
-          echo "fetched ${count} images"
-          [ "$count" -ge 6 ] || { echo "need at least 6 sample images"; exit 1; }
+          # COCO val2017: take the first N photos by file name (ids are unrelated to content).
+          curl -fL --retry 3 --retry-delay 5 -o data/val2017.zip \
+            "http://images.cocodataset.org/zips/val2017.zip"
+          unzip -Z1 data/val2017.zip | grep -E '^val2017/[0-9]+\.jpg$' | sort | head -n "$IMAGES" > data/selected.txt
+          count=$(wc -l < data/selected.txt)
+          echo "selected ${count} images"
+          [ "$count" -eq "$IMAGES" ] || { echo "val2017.zip had fewer than ${IMAGES} jpgs"; exit 1; }
+          xargs -a data/selected.txt unzip -q -j data/val2017.zip -d data/images
+          rm data/val2017.zip
+          ls data/images | wc -l
           ls -l data/model.safetensors
 
       - name: Build release binary
         run: cargo build -p mirage-train --release
 
-      - name: Train and evaluate
-        id: train
-        env:
-          STEPS: ${{ inputs.steps }}
+      - name: Train A (legacy window)
+        id: legacy
         run: |
           set -o pipefail
-          case "$STEPS" in ''|*[!0-9]*) echo "steps must be a whole number, got '$STEPS'"; exit 1 ;; esac
+          mkdir -p ci-logs/legacy
           s=$(date +%s); rc=0
           # stdout (the evaluation JSON) goes to a file; stderr (progress) is shown and logged.
           ./target/release/mirage-train train \
             --weights data/model.safetensors --images data/images \
-            --out ci-logs/pattern.mirp --preview ci-logs/preview.png \
-            --summary-md ci-logs/summary.md --holdout 3 --steps "$STEPS" \
-            2>&1 >ci-logs/eval.json | tee ci-logs/train.log || rc=$?
-          echo $(( $(date +%s) - s )) > ci-logs/train.secs
+            --out ci-logs/legacy/pattern.mirp --preview ci-logs/legacy/preview.png \
+            --summary-md ci-logs/legacy/summary.md \
+            --holdout "$HOLDOUT" --steps "$STEPS" --batch-size "$BATCH_SIZE" \
+            --legacy-full-window --jitter 0 \
+            2>&1 >ci-logs/legacy/eval.json | tee ci-logs/legacy/train.log || rc=$?
+          echo $(( $(date +%s) - s )) > ci-logs/legacy/train.secs
+          exit $rc
+
+      - name: Train B (aspect-aware windows + jitter)
+        id: aspect
+        if: ${{ !cancelled() }}
+        run: |
+          set -o pipefail
+          mkdir -p ci-logs/aspect
+          s=$(date +%s); rc=0
+          ./target/release/mirage-train train \
+            --weights data/model.safetensors --images data/images \
+            --out ci-logs/aspect/pattern.mirp --preview ci-logs/aspect/preview.png \
+            --summary-md ci-logs/aspect/summary.md \
+            --holdout "$HOLDOUT" --steps "$STEPS" --batch-size "$BATCH_SIZE" \
+            2>&1 >ci-logs/aspect/eval.json | tee ci-logs/aspect/train.log || rc=$?
+          echo $(( $(date +%s) - s )) > ci-logs/aspect/train.secs
           exit $rc
 
       - name: Job summary
         if: ${{ always() }}
         run: |
+          section() {
+            name="$1"; title="$2"; outcome="$3"
+            {
+              echo
+              echo "### ${title}"
+              echo
+              if [ -f "ci-logs/${name}/train.secs" ]; then echo "- **Training + evaluation time:** $(cat "ci-logs/${name}/train.secs")s"; fi
+              if [ -f "ci-logs/${name}/pattern.mirp" ]; then echo "- **Pattern file:** $(stat -c %s "ci-logs/${name}/pattern.mirp") bytes"; fi
+              echo
+              if [ -f "ci-logs/${name}/summary.md" ]; then cat "ci-logs/${name}/summary.md"; else echo "_No summary was produced (${outcome})._"; fi
+            } >> "$GITHUB_STEP_SUMMARY"
+            if [ "$outcome" = "failure" ]; then
+              {
+                echo
+                echo "<details open><summary>${title}: last 60 lines of output</summary>"
+                echo
+                echo '```'
+                tail -n 60 "ci-logs/${name}/train.log" 2>/dev/null || true
+                echo '```'
+                echo "</details>"
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
+          }
+
           {
             echo "## mirage-train real run"
             echo
-            if [ -f ci-logs/train.secs ]; then echo "- **Training + evaluation time:** $(cat ci-logs/train.secs)s"; fi
-            if [ -f ci-logs/pattern.mirp ]; then echo "- **Pattern file:** $(stat -c %s ci-logs/pattern.mirp) bytes (artifact \`mirage-train-run\`)"; fi
-            echo
-            if [ -f ci-logs/summary.md ]; then cat ci-logs/summary.md; else echo "_No summary was produced; see the log below._"; fi
+            echo "${IMAGES} COCO val2017 photos (first by file name), ${HOLDOUT} held out, ${STEPS} steps, batch ${BATCH_SIZE}. Same data and seed in both runs. Patterns and logs are in the \`mirage-train-run\` artifact."
           } >> "$GITHUB_STEP_SUMMARY"
-          if [ "${{ steps.train.outcome }}" = "failure" ]; then
-            {
-              echo
-              echo "<details open><summary>train: last 60 lines of output</summary>"
-              echo
-              echo '```'
-              tail -n 60 ci-logs/train.log 2>/dev/null || true
-              echo '```'
-              echo "</details>"
-            } >> "$GITHUB_STEP_SUMMARY"
-          fi
+          section legacy "A. Legacy window (pattern treated as covering exactly the crop, no jitter)" "${{ steps.legacy.outcome }}"
+          section aspect "B. Aspect-aware windows + jitter" "${{ steps.aspect.outcome }}"
 
       - name: Upload run outputs
         if: ${{ always() }}
