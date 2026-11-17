@@ -204,7 +204,9 @@ jobs:
           # COCO val2017: take the first N photos by file name (ids are unrelated to content).
           curl -fL --retry 3 --retry-delay 5 -o data/val2017.zip \
             "http://images.cocodataset.org/zips/val2017.zip"
-          unzip -Z1 data/val2017.zip | grep -E '^val2017/[0-9]+\.jpg$' | sort | head -n "$IMAGES" > data/selected.txt
+          # Sort to a file first: piping sort into head breaks under pipefail (head quits early, sort gets SIGPIPE).
+          unzip -Z1 data/val2017.zip | grep -E '^val2017/[0-9]+\.jpg$' | sort > data/all.txt
+          head -n "$IMAGES" data/all.txt > data/selected.txt
           count=$(wc -l < data/selected.txt)
           echo "selected ${count} images"
           [ "$count" -eq "$IMAGES" ] || { echo "val2017.zip had fewer than ${IMAGES} jpgs"; exit 1; }
@@ -214,6 +216,7 @@ jobs:
           ls -l data/model.safetensors
 
       - name: Build release binary
+        id: release
         run: cargo build -p mirage-train --release
 
       - name: Train A (legacy window)
@@ -235,7 +238,7 @@ jobs:
 
       - name: Train B (aspect-aware windows + jitter)
         id: aspect
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.release.outcome == 'success' }}
         run: |
           set -o pipefail
           mkdir -p ci-logs/aspect
