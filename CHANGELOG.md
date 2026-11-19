@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+- `gindema-vm`: added the mechanism for per-build opcode remap.
+  `OpCode::ALL`/`OPCODE_COUNT` enumerate the instruction set;
+  `OpcodeMap::identity()`/`from_permutation()` map a raw 6-bit wire value
+  to/from a logical opcode; `Program` now carries the `OpcodeMap` it was
+  encoded with (`ProgramBuilder::build` always produces `identity()`);
+  `remap_program(&Program, &OpcodeMap)` re-encodes a program's stream under
+  a different map as a pure, lossless, single-pass transcoding — every
+  instruction keeps its exact bit width and position (operand width is
+  fixed by the opcode, independent of numbering), so jump targets need no
+  recomputation at all. `Vm::run` now decodes via `program.opcode_map()`
+  instead of the fixed identity numbering. 31 unit tests + 1 doctest (up
+  from 22+1).
+- `gindema-obfuscate`: first real pass, per-build opcode remap.
+  `random_opcode_map(seed)`/`remap_opcodes(program, seed)` generate a
+  seeded pseudorandom permutation (`SplitMix64`, a partial Fisher-Yates
+  shuffle — not cryptographic, documented as such) and call into
+  `gindema-vm`'s new mechanism. Not yet wired into any build pipeline —
+  this is a library function today, not something `gindema-cli` calls
+  automatically. Control-flow flattening, state-dependent decoding, and
+  honeypot injection remain unimplemented; see `docs/gindema-obfuscate.md`'s
+  "Known limits" for the honest read on how strong this first pass actually
+  is. 7 unit tests + 1 doctest.
+
 - `gindema-ptr`: implemented. Vendored all 8 modules from mid-engine's
   `mid-ptr` (itself ported from Bevy's `bevy_ptr`, MIT/Apache-2.0):
   `Aligned`/`Unaligned`/`IsAligned`, `ConstNonNull`, `DebugEnsureAligned`,

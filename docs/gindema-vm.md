@@ -16,9 +16,19 @@ opcode followed by a variable-width operand, byte-unaligned between
 instructions — denser and less immediately recognizable to a generic
 disassembler than a byte-aligned format). Does not yet depend on
 `gindema-ptr`: nothing here needs a type-erased accessor yet, since there's
-no obfuscation layer or anti-tamper guard consuming the interpreter's memory
-access patterns. That integration is future work for whichever of
-`gindema-guard`/`gindema-obfuscate` gets built next.
+no anti-tamper guard consuming the interpreter's memory access patterns yet.
+That integration is future work for `gindema-guard`.
+
+**Per-build opcode remap, mechanism vs. policy:** this crate now owns the
+*mechanism* — `OpcodeMap` and `remap_program` (see those modules below) can
+losslessly re-encode an already-built `Program` under a different raw
+opcode numbering, with every bit offset in the stream staying valid. It
+still has no opinion on the *policy* — generating the actual random
+permutation for a given build is `gindema-obfuscate`'s job, which calls
+into this mechanism rather than reimplementing it. Control-flow
+flattening, state-dependent decoding, and honeypot/dead-end injection
+remain entirely `gindema-obfuscate`'s, with no corresponding support here
+yet.
 
 ## Instruction set
 
@@ -84,11 +94,60 @@ numeric encoding, and `operand_width` (0 for opcodes with none).
 numeric value fits `OPCODE_WIDTH` bits; `operand_width` matches the declared
 constants per opcode.
 
+### `opcode_map.rs`
+**What it does:** `OpcodeMap` — maps the raw 6-bit value on the wire to and
+from the logical `OpCode` a given `Program` was encoded with.
+`OpcodeMap::identity()` (what `ProgramBuilder::build` always produces) maps
+every opcode to its own canonical `to_u8()` value.
+`OpcodeMap::from_permutation([u8; OPCODE_COUNT])` builds a non-identity map
+from a caller-supplied assignment — validated (`RawValueOutOfRange`,
+`DuplicateRawValue`) rather than trusted. `OpCode::ALL` (added to
+`opcode.rs` alongside this) is what both builders iterate over, so adding a
+future opcode only means updating that one array.
+
+This crate only validates and *applies* a permutation — it has no opinion
+on how one is generated. That's deliberately left to whoever wants a
+non-identity map (`gindema-obfuscate`'s per-build remap is the first real
+caller); keeping randomness-generation out of `gindema-vm` means this
+crate's own tests stay fully deterministic.
+
+**Tests:** inline. Identity round-trips every opcode through its own
+value; a scrambled (reversed, spread-out) permutation round-trips the same
+way; out-of-range and duplicate raw values are both rejected; an
+unassigned raw value decodes to `None` rather than panicking.
+
+### `remap.rs`
+**What it does:** `remap_program(&Program, &OpcodeMap) -> Result<Program,
+VmError>` — re-encodes a program's instruction stream under a different
+`OpcodeMap`, changing nothing about its logic, constants, or local count.
+
+**Why this is a lossless, pure transcoding and not a decode-and-rebuild:**
+an opcode's operand *width* is fixed by the opcode itself
+(`OpCode::operand_width`) and does not depend on which `OpcodeMap` is in
+use — only which raw 6-bit value means that opcode does. So every
+instruction occupies exactly the same number of bits, at exactly the same
+position in the stream, before and after remapping. That means every
+`Jump`/`JumpIfFalse` target (an absolute bit offset) stays valid completely
+unchanged — there is nothing to recompute, unlike `ProgramBuilder::build`'s
+own two-pass label resolution. The function just walks the stream once:
+decode each opcode field under the *old* map, re-encode under the *new*
+one, copy the operand bits through unchanged, stop at `Halt`.
+
+**Tests:** inline. A real program (with a loop, so jump targets are
+actually exercised) remapped under a deliberately scattered, reversed
+permutation: same byte length, different bytes, and — run through `Vm`
+both ways — identical result. Remapping with the same map the program
+already uses is a byte-for-byte no-op. Remapping to a scrambled map and
+then back to identity recovers the exact original bytes.
+
 ### `program.rs`
 **What it does:** `Instr` (the builder's intermediate instruction
 representation — jump operands are `LabelId`s here, not yet bit offsets),
 `LabelId`, `BuildError`, `Program` (the assembled result: bit-packed `code`,
-`constants`, `local_count`), and `ProgramBuilder`.
+`constants`, `local_count`, and — added alongside `opcode_map.rs` — the
+`OpcodeMap` the stream was encoded with, plus `code_bytes()`/`opcode_map()`
+accessors for passes like `remap_program` that transform an already-built
+program), and `ProgramBuilder`.
 
 **Design — two-pass label resolution instead of back-patching:** a jump
 target isn't always known when the jump instruction is emitted (a forward
@@ -168,8 +227,12 @@ local-slot indices both reported with the offending index in the error.
 - No strings, arrays, or heap objects — `Value` is `Int`/`Float`/`Bool` only.
 - No assembly syntax or disassembler — programs are built and inspected only
   through `ProgramBuilder`'s own API.
-- No obfuscation of any kind (that's `gindema-obfuscate`): the opcode
-  numbering above is the one fixed baseline, not per-build-randomized.
+- `ProgramBuilder::build` always produces the identity `OpcodeMap` — this
+  crate never randomizes a program's own numbering on its own. The
+  mechanism to re-encode under a different map exists (`remap_program`),
+  but choosing or generating that map is entirely `gindema-obfuscate`'s
+  job. Control-flow flattening, state-dependent decoding, and honeypot/
+  dead-end injection have no support here at all yet.
 - `gindema-ptr` is not yet used anywhere in this crate (see "Overview").
 - The interpreter's bit-by-bit decode (inherited from `gindema-bits`, see
   that crate's own "Known limits") is not optimized; nothing here has shown
@@ -178,7 +241,7 @@ local-slot indices both reported with the offending index in the error.
 ## CI and Workflows
 
 See `.github/workflows/ci.yml` (workspace-wide, workflow_dispatch only).
-`cargo test -p gindema-vm` runs 22 unit tests + 1 doctest; `cargo clippy -p
+`cargo test -p gindema-vm` runs 31 unit tests + 1 doctest; `cargo clippy -p
 gindema-vm --all-targets -- -D warnings` and `cargo fmt -p gindema-vm --
 --check` are both clean. Verified in the sandbox on Rust 1.100.
 

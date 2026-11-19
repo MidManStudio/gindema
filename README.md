@@ -7,10 +7,14 @@ Closed-source code/binary protection core **and** gameplay video/image poisoning
 Protection core: `gindema-ptr` (vendored type-erased pointer primitives),
 `gindema-bits` (bit-level stream I/O — see `docs/gindema-bits.md` for why
 this ended up written fresh rather than literally vendored), and
-`gindema-vm` (the baseline bytecode interpreter, no obfuscation yet) are now
-implemented and tested. `gindema-common`, `gindema-obfuscate`,
-`gindema-guard`, `gindema-container`, and `gindema-cli` are still scaffold
-stage: crate structure is real, the logic inside each isn't written yet.
+`gindema-vm` (the baseline bytecode interpreter, now with an
+`OpcodeMap`/`remap_program` mechanism for per-build remapping) are
+implemented and tested. `gindema-obfuscate` has its first real pass —
+per-build opcode remap, see `docs/gindema-obfuscate.md` — but not yet
+control-flow flattening, state-dependent decoding, or honeypot injection.
+`gindema-common`, `gindema-guard`, `gindema-container`, and `gindema-cli`
+are still scaffold stage: crate structure is real, the logic inside each
+isn't written yet.
 `mirage-ffmpeg` and `mirage-cli` are also still scaffold stage. `pixelflip-*`
 is real and working. `mirage-core` (pattern format and frame application)
 and `mirage-train` (offline training and evaluation against CLIP) are

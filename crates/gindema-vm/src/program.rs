@@ -8,6 +8,7 @@ use std::fmt;
 use gindema_bits::BitWriter;
 
 use crate::opcode::OpCode;
+use crate::opcode_map::OpcodeMap;
 use crate::value::Value;
 
 /// An opaque handle to a not-yet-resolved jump target, created by
@@ -132,6 +133,7 @@ pub struct Program {
     pub(crate) code: Vec<u8>,
     pub(crate) constants: Vec<Value>,
     pub(crate) local_count: u8,
+    pub(crate) opcode_map: OpcodeMap,
 }
 
 impl Program {
@@ -149,6 +151,22 @@ impl Program {
     /// byte-alignment padding).
     pub fn code_len_bytes(&self) -> usize {
         self.code.len()
+    }
+
+    /// The raw, bit-packed instruction stream. Exposed for passes that
+    /// transform an already-built program (such as
+    /// [`crate::remap_program`]) — running a program never needs this
+    /// directly; [`crate::Vm::run`] reads it internally.
+    pub fn code_bytes(&self) -> &[u8] {
+        &self.code
+    }
+
+    /// The [`OpcodeMap`] this program's instruction stream was encoded
+    /// with. [`crate::ProgramBuilder::build`] always produces
+    /// [`OpcodeMap::identity`]; a program that's been through
+    /// [`crate::remap_program`] carries whatever map it was remapped to.
+    pub fn opcode_map(&self) -> &OpcodeMap {
+        &self.opcode_map
     }
 }
 
@@ -360,6 +378,7 @@ impl ProgramBuilder {
             code: writer.into_bytes(),
             constants,
             local_count: self.local_count,
+            opcode_map: OpcodeMap::identity(),
         })
     }
 }

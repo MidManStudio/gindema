@@ -10,3 +10,6 @@ publish = false
 [dependencies]
 gindema-common = { path = "../gindema-common" }
 gindema-vm = { path = "../gindema-vm" }
+
+[lints]
+workspace = true

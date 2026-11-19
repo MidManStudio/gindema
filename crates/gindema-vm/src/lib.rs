@@ -43,12 +43,18 @@
 
 mod error;
 mod opcode;
+mod opcode_map;
 mod program;
+mod remap;
 mod value;
 mod vm;
 
 pub use error::VmError;
-pub use opcode::{OpCode, CONST_INDEX_WIDTH, JUMP_TARGET_WIDTH, LOCAL_SLOT_WIDTH, OPCODE_WIDTH};
+pub use opcode::{
+    OpCode, CONST_INDEX_WIDTH, JUMP_TARGET_WIDTH, LOCAL_SLOT_WIDTH, OPCODE_COUNT, OPCODE_WIDTH,
+};
+pub use opcode_map::{OpcodeMap, OpcodeMapError};
 pub use program::{BuildError, Instr, LabelId, Program, ProgramBuilder};
+pub use remap::remap_program;
 pub use value::Value;
 pub use vm::{Vm, DEFAULT_STEP_LIMIT};

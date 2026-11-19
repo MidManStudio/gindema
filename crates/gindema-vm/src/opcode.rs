@@ -13,6 +13,8 @@ pub const LOCAL_SLOT_WIDTH: u32 = 8;
 /// Width, in bits, of `Jump`/`JumpIfFalse`'s target operand — an absolute bit
 /// offset into the program's own bytecode stream.
 pub const JUMP_TARGET_WIDTH: u32 = 32;
+/// The number of opcodes [`OpCode`] defines — the length of [`OpCode::ALL`].
+pub const OPCODE_COUNT: usize = 17;
 
 /// gindema-vm's own instruction set. Invented for this project specifically,
 /// not modeled on any real bytecode VM's numbering or mnemonics — see
@@ -62,6 +64,31 @@ pub enum OpCode {
 }
 
 impl OpCode {
+    /// Every defined opcode, in the same order as their canonical numeric
+    /// values (`Halt` first, `JumpIfFalse` last). [`crate::OpcodeMap`]'s
+    /// identity and permutation builders iterate this list rather than the
+    /// raw `0..=16` range, so a future opcode addition only has to update
+    /// this one array.
+    pub const ALL: [Self; OPCODE_COUNT] = [
+        Self::Halt,
+        Self::Pop,
+        Self::Dup,
+        Self::Swap,
+        Self::Add,
+        Self::Sub,
+        Self::Mul,
+        Self::Div,
+        Self::Neg,
+        Self::Not,
+        Self::Eq,
+        Self::Lt,
+        Self::LoadConst,
+        Self::LoadLocal,
+        Self::StoreLocal,
+        Self::Jump,
+        Self::JumpIfFalse,
+    ];
+
     /// The numeric encoding written to the bytecode stream.
     pub const fn to_u8(self) -> u8 {
         self as u8
@@ -137,6 +164,19 @@ mod tests {
     fn every_opcode_fits_the_opcode_width() {
         for byte in 0..=16u8 {
             assert!((byte as u32) < (1 << OPCODE_WIDTH));
+        }
+    }
+
+    #[test]
+    fn all_contains_every_decodable_opcode_exactly_once() {
+        assert_eq!(OpCode::ALL.len(), OPCODE_COUNT);
+        for byte in 0..=16u8 {
+            let op = OpCode::from_u8(byte).unwrap();
+            assert_eq!(
+                OpCode::ALL.iter().filter(|o| **o == op).count(),
+                1,
+                "opcode {byte} should appear in ALL exactly once"
+            );
         }
     }
 

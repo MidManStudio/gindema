@@ -66,7 +66,10 @@ impl Vm {
             steps += 1;
 
             let opcode_byte = reader.read_bits(OPCODE_WIDTH)? as u8;
-            let opcode = OpCode::from_u8(opcode_byte).ok_or(VmError::InvalidOpcode(opcode_byte))?;
+            let opcode = program
+                .opcode_map()
+                .decode(opcode_byte)
+                .ok_or(VmError::InvalidOpcode(opcode_byte))?;
 
             match opcode {
                 OpCode::Halt => break,
