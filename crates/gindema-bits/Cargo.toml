@@ -8,3 +8,6 @@ description = "Bit-level stream I/O vendored from mbfa, for the gindema-vm bytec
 publish = false
 
 [dependencies]
+
+[lints]
+workspace = true

@@ -8,3 +8,6 @@ description = "Type-erased pointer primitives vendored from mid-engine's mid-ptr
 publish = false
 
 [dependencies]
+
+[lints]
+workspace = true

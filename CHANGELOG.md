@@ -2,6 +2,37 @@
 
 ## [Unreleased]
 
+- `gindema-ptr`: implemented. Vendored all 8 modules from mid-engine's
+  `mid-ptr` (itself ported from Bevy's `bevy_ptr`, MIT/Apache-2.0):
+  `Aligned`/`Unaligned`/`IsAligned`, `ConstNonNull`, `DebugEnsureAligned`,
+  `Ptr`/`PtrMut`/`OwningPtr`, `MovingPtr` + its field-deconstruction macros,
+  `ThinSlicePtr`, `UnsafeCellDeref`. `no_std`, zero dependencies, opted into
+  `[lints] workspace = true` with the documented `#![allow(unsafe_code)]`
+  escape hatch. Fixed two issues found in the upstream source while porting
+  (a clippy-flagged un-elided lifetime, a stray duplicate closing brace) and
+  updated the doctests' crate-path references from `mid_ptr` to
+  `gindema_ptr`. Flags an open licensing question (MIT/Apache-2.0 attribution
+  for a publicly-distributed proprietary binary) rather than resolving it —
+  see `docs/gindema-ptr.md`. 20 unit tests + 4 doctests.
+- `gindema-bits`: implemented, but not as originally scaffolded. mbfa's
+  `bitreader.rs`/`bitwriter.rs` turned out to be mbfa's own LZ-token codec
+  built on the published `bitstream_io` crate, not generic bit I/O — nothing
+  there to vendor. Implemented a fresh, zero-dependency `BitWriter`/
+  `BitReader` pair instead: arbitrary-width (1..=64 bit) field read/write,
+  byte alignment, and `seek_to_bit` (for `gindema-vm`'s jump instructions).
+  See `docs/gindema-bits.md` for the full "plan change" note. 13 unit tests.
+- `gindema-vm`: implemented a real baseline (not the full obfuscation
+  layer — that's `gindema-obfuscate`'s job). 17 invented opcodes, a `Value`
+  type (`Int`/`Float`/`Bool`), a two-pass label-resolving `ProgramBuilder`
+  (resolves jump targets without needing to back-patch already-written bits,
+  since every instruction's encoded width is fixed by its opcode), and a
+  safe interpreter loop with a step-limit safety net against runaway loops.
+  No unsafe code in this pass; the scaffold's `#![allow(unsafe_code)]` was
+  removed since nothing uses it yet. Depends on `gindema-bits` for the
+  bytecode stream; doesn't use `gindema-ptr` yet (nothing consumes it until
+  gindema-guard/gindema-obfuscate exist). 22 unit tests + 1 doctest,
+  including a real backward-jump loop and a forward conditional branch.
+
 - Scaffold: workspace and crate structure only, no implementation yet. Protection core and video-poisoning tool merged into one workspace.
 - Added `pixelflip-core`/`pixelflip-cli`: real, working pattern-based pixel negation effects (checker, stripes, diagonal, radial, noise, luminance). Not part of the anti-AI tooling, a separate styling utility.
 - Raised workspace `rust-version` from 1.75 to 1.100 (CI now builds on `stable`) and set `resolver = "3"`. Real CI runs showed 1.85 fails on `image`/`zip` (they need 1.88) and 1.88 fails inside `candle-core 0.11.1` (AVX-512 target features are only stable from 1.89, and it calls `__cpuid_count` from safe code, which needs a Rust newer than 1.92). See README.

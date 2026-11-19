@@ -4,12 +4,19 @@ Closed-source code/binary protection core **and** gameplay video/image poisoning
 
 ## Status
 
-Scaffold stage for `gindema-*`, `mirage-ffmpeg` and `mirage-cli`: crate
-structure is real, the logic inside each isn't written yet. `pixelflip-*` is
-real and working. `mirage-core` (pattern format and frame application) and
-`mirage-train` (offline training and evaluation against CLIP) are implemented
-and tested, but a trained pattern's effectiveness against the real CLIP
-checkpoint has not been measured yet; see `docs/mirage-train.md`.
+Protection core: `gindema-ptr` (vendored type-erased pointer primitives),
+`gindema-bits` (bit-level stream I/O — see `docs/gindema-bits.md` for why
+this ended up written fresh rather than literally vendored), and
+`gindema-vm` (the baseline bytecode interpreter, no obfuscation yet) are now
+implemented and tested. `gindema-common`, `gindema-obfuscate`,
+`gindema-guard`, `gindema-container`, and `gindema-cli` are still scaffold
+stage: crate structure is real, the logic inside each isn't written yet.
+`mirage-ffmpeg` and `mirage-cli` are also still scaffold stage. `pixelflip-*`
+is real and working. `mirage-core` (pattern format and frame application)
+and `mirage-train` (offline training and evaluation against CLIP) are
+implemented and tested, but a trained pattern's effectiveness against the
+real CLIP checkpoint has only been partly measured; see
+`docs/mirage-train.md`.
 
 ## Toolchain: stable (1.100 at time of writing), not 1.75, 1.85 or 1.88
 
@@ -46,8 +53,8 @@ Protection core:
 - `crates/gindema-obfuscate` - compiler passes
 - `crates/gindema-guard` - runtime anti-tamper watchdog
 - `crates/gindema-container` - encrypted asset container (built on dixscript)
-- `crates/gindema-ptr` - vendored pointer primitives
-- `crates/gindema-bits` - vendored bit-level I/O
+- `crates/gindema-ptr` - vendored type-erased pointer primitives (from mid-engine's `mid-ptr`)
+- `crates/gindema-bits` - bit-level stream I/O for the VM's bytecode format (not vendored after all — see `docs/gindema-bits.md`)
 - `crates/gindema-cli` - the distributable protection-core CLI
 
 Video/image poisoning (placeholder name "mirage", rename before shipping):
