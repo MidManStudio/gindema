@@ -2,6 +2,36 @@
 
 ## [Unreleased]
 
+- `gindema-ptr`: the open MIT/Apache-2.0 attribution question raised when
+  this crate was first vendored is resolved — the project owner has
+  decided the whole repository is treated as proprietary and no separate
+  attribution/NOTICE file will be added. `docs/gindema-ptr.md` updated to
+  record the decision rather than leave it flagged as open.
+- `gindema-obfuscate`: second pass, honeypot/dead-end injection.
+  `inject_honeypot(&mut ProgramBuilder, seed)` emits an always-taken
+  conditional branch (two equal-valued constants, `Eq`/`Not`/
+  `JumpIfFalse`) guarding a short run of fake arithmetic that ends in its
+  own `Halt` — a literal dead end, never reached. Needed no changes to
+  `gindema-vm` at all, unlike opcode remap — built entirely on
+  `ProgramBuilder`'s existing label/jump API. Control-flow flattening and
+  state-dependent decoding remain unimplemented; `docs/gindema-obfuscate.md`
+  now also spells out the honeypot's own real weakness (the always-taken
+  pattern is a fixed, recognizable shape once someone's read this source).
+  11 unit tests + 2 doctests (up from 7 + 1).
+
+- `gindema-guard`: first real pass. `checksum()` (FNV-1a 64-bit, explicitly
+  non-cryptographic) and `Watch` (records a region's checksum, re-checks it
+  later); `TimingWindow` (elapsed-time checks, the debugger/breakpoint
+  signal); `GuardState` (one shared, sticky, one-directional pollution
+  flag — no way to un-pollute); `Guarded<T>` (reads a decoy instead of the
+  real value once polluted, rather than crashing or otherwise making
+  detection observable). No unsafe code; removed the scaffold's unused
+  `#![allow(unsafe_code)]`, same reasoning as `gindema-vm`'s. Does **not**
+  use `gindema-ptr` yet — `docs/gindema-guard.md`'s "Known limits" spells
+  out why honestly (can't verify a machine-code-level benefit from this
+  sandbox) rather than adding it on faith. Not wired into any other crate
+  yet. 15 unit tests + 1 doctest.
+
 - `gindema-vm`: added the mechanism for per-build opcode remap.
   `OpCode::ALL`/`OPCODE_COUNT` enumerate the instruction set;
   `OpcodeMap::identity()`/`from_permutation()` map a raw 6-bit wire value

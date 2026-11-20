@@ -18,7 +18,7 @@ shape for a decompiler to pattern-match against. Neither of those crates
 consumes it yet — gindema-ptr is a leaf dependency with no consumers in the
 workspace so far; this pass vendored and verified the primitive itself.
 
-## Provenance and licensing (carried over from mid-engine, open)
+## Provenance and licensing (resolved — project owner's call, see below)
 
 This is a close port, not a from-scratch design — the type layouts, safety
 invariants, and most of the doc comments come directly from mid-engine's
@@ -36,16 +36,10 @@ made a license decision project-wide.** gindema is in a different position:
 its own `LICENSE` is already proprietary/all-rights-reserved, and the compiled
 CLI it produces is distributed publicly — so a substantial derivative of
 MIT/Apache-2.0 code sitting inside it is a real question, not a deferred one.
-**This has not been resolved in this pass; flagging it rather than picking an
-answer.** MIT and Apache-2.0 both permit this kind of closed/commercial use,
-but both also carry attribution obligations (reproducing the copyright
-notice and license text; Apache-2.0 additionally expects a NOTICE file to
-travel with binary distributions). Before `gindema-cli` ships publicly, this
-crate specifically needs either a `THIRD_PARTY_NOTICES`-style file carrying
-`bevy_ptr`'s copyright and license text, or legal review of whether the
-`#![no_std]`, non-public (not re-exported past gindema-guard/gindema-obfuscate,
-once those exist) nature of this crate changes that calculus. Not a call this
-pass makes on its own.
+**Resolved by the project owner:** the whole repository is treated as
+proprietary, and no separate attribution/NOTICE file is being added for
+this (or any other) vendored code. Recorded here for the record, not as an
+open item to keep re-raising.
 
 ## Modules
 
