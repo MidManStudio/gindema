@@ -3,7 +3,8 @@
 // live in docs/gindema-guard.md, section "watch.rs"
 // ============================================================================
 
-use crate::checksum::{checksum, checksums_match};
+use gindema_common::{checksum, checksums_match};
+
 use crate::state::GuardState;
 
 /// Remembers the checksum of a byte region at the moment [`Watch::new`] was

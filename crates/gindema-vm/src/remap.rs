@@ -6,7 +6,7 @@
 use gindema_bits::{BitReader, BitWriter};
 
 use crate::error::VmError;
-use crate::opcode::{OpCode, OPCODE_WIDTH};
+use crate::opcode::OPCODE_WIDTH;
 use crate::opcode_map::OpcodeMap;
 use crate::program::Program;
 
@@ -26,6 +26,17 @@ use crate::program::Program;
 /// decoded under `program`'s current map, re-encoded under `new_map`, and
 /// its operand bits (if any) are copied through verbatim.
 ///
+/// Walks every instruction up to exactly [`Program::code_bit_len`] bits —
+/// **not** until the first `Halt` opcode. An earlier version of this
+/// function stopped at the first `Halt` it decoded, which is correct for
+/// [`crate::Vm::run`] (which only ever reaches a `Halt` by actually
+/// executing its way there) but silently truncated any program containing
+/// dead code with its own `Halt` positioned earlier in the raw byte stream
+/// than the program's real one — exactly what a `gindema-obfuscate`
+/// honeypot's dead end is. This function never follows control flow, so it
+/// has no way to tell a reachable `Halt` from a dead one; decoding by exact
+/// bit length rather than by opcode sidesteps needing to.
+///
 /// `gindema-obfuscate`'s per-build opcode remap is the intended caller:
 /// generate a random permutation, build an [`OpcodeMap`] from it, and
 /// remap the program compiled from the one fixed `gindema-vm` baseline.
@@ -39,8 +50,9 @@ use crate::program::Program;
 pub fn remap_program(program: &Program, new_map: &OpcodeMap) -> Result<Program, VmError> {
     let mut reader = BitReader::new(program.code_bytes());
     let mut writer = BitWriter::new();
+    let end_bit = program.code_bit_len();
 
-    loop {
+    while reader.bit_pos() < end_bit {
         let raw = reader.read_bits(OPCODE_WIDTH)? as u8;
         let opcode = program
             .opcode_map()
@@ -58,14 +70,11 @@ pub fn remap_program(program: &Program, new_map: &OpcodeMap) -> Result<Program, 
                 .write_bits(operand, width)
                 .expect("operand bits are copied at their original width, which already fit");
         }
-
-        if opcode == OpCode::Halt {
-            break;
-        }
     }
 
     Ok(Program {
         code: writer.into_bytes(),
+        code_bit_len: end_bit,
         constants: program.constants().to_vec(),
         local_count: program.local_count(),
         opcode_map: new_map.clone(),
@@ -126,6 +135,41 @@ mod tests {
             vm_original.run(&original).unwrap(),
             vm_remapped.run(&remapped).unwrap()
         );
+    }
+
+    #[test]
+    fn remap_does_not_truncate_at_an_unreached_halt_in_dead_code() {
+        // Reproduces, inside this crate (gindema-vm can't depend on
+        // gindema-obfuscate to use its real inject_honeypot), the exact
+        // shape that first caught this bug: a branch that's always taken,
+        // skipping over dead code which itself contains a `Halt` -- placed
+        // in the byte stream *before* the real, reachable code that
+        // follows. The old Halt-stops-decoding version of remap_program
+        // would truncate here and never reach this test's final
+        // `load_const(two).halt()` at all.
+        let mut b = ProgramBuilder::new(0);
+        let one = b.add_const(Value::Int(1)).unwrap();
+        let fake = b.add_const(Value::Int(999)).unwrap();
+        let two = b.add_const(Value::Int(2)).unwrap();
+
+        // An always-false condition (built from a literal, not from any
+        // runtime state) so `jump_if_false` always takes the skip.
+        let always_false = b.add_const(Value::Bool(false)).unwrap();
+        let skip = b.new_label();
+        b.load_const(always_false).jump_if_false(skip);
+        // Dead code: never reached, but it has its own Halt, positioned
+        // earlier in the stream than the real one below.
+        b.load_const(fake).halt();
+        b.place_label(skip);
+        // Real, reachable code, physically after the dead Halt above.
+        b.load_const(one).load_const(two).add().halt();
+        let original = b.build().unwrap();
+
+        let remapped = remap_program(&original, &scrambled_map()).unwrap();
+        assert_eq!(remapped.code_bit_len(), original.code_bit_len());
+
+        let mut vm = Vm::new();
+        assert_eq!(vm.run(&remapped).unwrap(), Some(Value::Int(3)));
     }
 
     #[test]

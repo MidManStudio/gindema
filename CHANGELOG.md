@@ -2,6 +2,48 @@
 
 ## [Unreleased]
 
+- `gindema-common`: first real content. `checksum()`/`checksums_match()`
+  (FNV-1a, 64-bit) moved here from `gindema-guard` once a second plausible
+  consumer made "every crate rolls its own" the wrong call. `gindema-guard`
+  updated to call `gindema_common::checksum` instead of its own now-deleted
+  copy — finally gives this crate's long-unused dependency in
+  `gindema-guard`'s `Cargo.toml` something real to do. Shared error
+  types/traits (named in this crate's own description) still don't exist;
+  see `docs/gindema-common.md`'s "Known limits" for why. 4 unit tests.
+- `gindema-vm`: **bug fix.** `remap_program` stopped decoding at the first
+  `Halt` opcode, which silently truncated any program containing a
+  `gindema-obfuscate` honeypot (whose dead-end block has its own `Halt`,
+  positioned earlier in the raw byte stream than the program's real one,
+  even though never actually reached at runtime). Fixed by adding
+  `Program::code_bit_len` — the exact real bit length, already computed by
+  `ProgramBuilder::build`'s label-resolution pass but previously
+  discarded — and having `remap_program` decode exactly that many bits
+  instead. Caught by `gindema-cli`'s own integration test, not by any
+  single crate's unit tests in isolation; see that crate's "Fixes and
+  Problems" for the full story.
+- `gindema-vm`: added `Program::to_bytes`/`from_bytes` — a self-contained
+  binary file format (magic, version, `local_count`, `code_bit_len`, the
+  opcode table, the constant pool, the bytecode) that makes a `Program`
+  persistable at all; without it a program only ever existed for one
+  process's lifetime. 39 unit tests + 1 doctest (up from 31 + 1).
+- `gindema-obfuscate`: no functional change, but gained a 4th dependency
+  edge worth noting — `gindema-cli` calling `inject_honeypot` followed by
+  `remap_opcodes` is what surfaced the `gindema-vm` bug above.
+- `gindema-cli`: first real pass — no longer a scaffold stub. `demo`
+  (builds a fixed demo program, sums `1..=10` via a real loop, with
+  optional honeypots), `info` (summarizes a program file), `run` (loads
+  and runs one), `remap` (per-build opcode remap on a saved file) — a
+  real, working pipeline. Hand-rolled argument parsing rather than `clap`,
+  kept deliberately separate from command execution so it's unit-testable
+  without touching the filesystem. Does not use `gindema-guard` or
+  `gindema-container` — `docs/gindema-cli.md` explains why neither fits
+  this crate's actual job rather than being an oversight. The single
+  biggest gap: there is still no assembly language, so `demo`'s one fixed
+  program is the only way to get a program file at all. 15 unit tests,
+  plus the built binary itself run end-to-end by hand (`demo` →
+  `info`/`run` → `remap` → `info`/`run` again → a deliberately-missing-file
+  error case), not just `cargo test`.
+
 - `gindema-ptr`: the open MIT/Apache-2.0 attribution question raised when
   this crate was first vendored is resolved — the project owner has
   decided the whole repository is treated as proprietary and no separate

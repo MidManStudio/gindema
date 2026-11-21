@@ -7,17 +7,23 @@ Closed-source code/binary protection core **and** gameplay video/image poisoning
 Protection core: `gindema-ptr` (vendored type-erased pointer primitives),
 `gindema-bits` (bit-level stream I/O — see `docs/gindema-bits.md` for why
 this ended up written fresh rather than literally vendored), and
-`gindema-vm` (the baseline bytecode interpreter, now with an
-`OpcodeMap`/`remap_program` mechanism for per-build remapping) are
-implemented and tested. `gindema-obfuscate` has two of its four passes — per-build opcode remap
-and honeypot/dead-end injection, see `docs/gindema-obfuscate.md` (including
-honest limits on how strong each one currently is) — but not yet
-control-flow flattening or state-dependent decoding.
-`gindema-guard` has its first real pass too — timing/checksum watchdog
-plus pollution-state reads, see `docs/gindema-guard.md` for real limits —
-but doesn't use `gindema-ptr` yet and isn't wired into anything.
-`gindema-common`, `gindema-container`, and `gindema-cli` are still scaffold
-stage: crate structure is real, the logic inside each isn't written yet.
+`gindema-vm` (the baseline bytecode interpreter, with `OpcodeMap`/
+`remap_program` for per-build remapping and `Program::to_bytes`/
+`from_bytes` for persisting a program to a file) are implemented and
+tested. `gindema-obfuscate` has two of its four passes — per-build opcode
+remap and honeypot/dead-end injection, see `docs/gindema-obfuscate.md`
+(including honest limits on how strong each one currently is) — but not
+yet control-flow flattening or state-dependent decoding. `gindema-guard`
+has its first real pass too — timing/checksum watchdog plus
+pollution-state reads, see `docs/gindema-guard.md` for real limits — but
+doesn't use `gindema-ptr` yet and isn't wired into anything.
+`gindema-common` finally has something real in it (a shared checksum, used
+by `gindema-guard`), though not yet the shared error types/traits its own
+description names. `gindema-cli` is a real, working `demo`/`info`/`run`/
+`remap` pipeline, with one load-bearing gap: there is still no assembly
+language, so `demo` is the only way to get a program file at all — see
+`docs/gindema-cli.md`. `gindema-container` is still scaffold stage: crate
+structure is real, the logic inside isn't written yet.
 `mirage-ffmpeg` and `mirage-cli` are also still scaffold stage. `pixelflip-*`
 is real and working. `mirage-core` (pattern format and frame application)
 and `mirage-train` (offline training and evaluation against CLIP) are

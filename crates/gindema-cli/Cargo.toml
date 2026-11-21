@@ -19,3 +19,6 @@ gindema-guard = { path = "../gindema-guard" }
 gindema-container = { path = "../gindema-container" }
 gindema-ptr = { path = "../gindema-ptr" }
 gindema-bits = { path = "../gindema-bits" }
+
+[lints]
+workspace = true

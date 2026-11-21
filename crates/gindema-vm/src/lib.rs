@@ -46,10 +46,11 @@ mod opcode;
 mod opcode_map;
 mod program;
 mod remap;
+mod serialize;
 mod value;
 mod vm;
 
-pub use error::VmError;
+pub use error::{SerializeError, VmError};
 pub use opcode::{
     OpCode, CONST_INDEX_WIDTH, JUMP_TARGET_WIDTH, LOCAL_SLOT_WIDTH, OPCODE_COUNT, OPCODE_WIDTH,
 };

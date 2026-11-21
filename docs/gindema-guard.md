@@ -9,10 +9,13 @@ itself being an observable event. Applied selectively — to specific values
 worth protecting — never to a whole game loop.
 
 This first pass is a real, working core, not a stub: `TimingWindow`
-(elapsed-time checks), `Watch` (byte-region checksum checks), `GuardState`
-(the shared, sticky pollution flag), `Guarded<T>` (the decoy-on-pollution
-read). No unsafe code, and no use of `gindema-ptr` yet — see "Known limits"
-for why that second one is a deliberate choice, not an oversight.
+(elapsed-time checks), `Watch` (byte-region checksum checks, via
+`gindema_common::checksum` — moved there after this crate's own copy
+turned out to be exactly the integrity primitive other crates would
+plausibly also want), `GuardState` (the shared, sticky pollution flag),
+`Guarded<T>` (the decoy-on-pollution read). No unsafe code, and no use of
+`gindema-ptr` yet — see "Known limits" for why that second one is a
+deliberate choice, not an oversight.
 
 ## Modules
 
@@ -20,23 +23,6 @@ for why that second one is a deliberate choice, not an oversight.
 **What it does:** crate doc (with a runnable example wiring all four pieces
 together: a `Watch` on some data, a `Guarded` value, a `TimingWindow`, all
 sharing one `GuardState`), module wiring, flat re-exports.
-
-### `checksum.rs`
-**What it does:** `checksum(&[u8]) -> u64` — FNV-1a, 64-bit. Explicitly
-*not* a cryptographic hash: no resistance to a deliberate attacker
-constructing a different byte sequence with the same checksum. For
-noticing that a watched region changed from what it was when watching
-started, that's sufficient; it would not be sufficient if the threat model
-required resisting someone who can choose what to corrupt a region *into*
-while keeping the checksum unchanged. `checksums_match(u64, u64) -> bool`
-(crate-private) compares via XOR rather than `==` for whatever small amount
-of timing-side-channel resistance that's worth — documented as best-effort
-and unverified against actual compiled output, not a real guarantee.
-
-**Tests:** inline. Same bytes always checksum the same; different bytes
-checksum differently (two cases: a one-byte change, empty vs. one zero
-byte); empty input doesn't panic and equals the FNV offset basis by
-definition; `checksums_match` agrees with plain equality.
 
 ### `timing.rs`
 **What it does:** `TimingWindow::start()` captures `Instant::now()`;
@@ -62,9 +48,10 @@ a way to make a tampered run look clean again.
 second call changes nothing observable (idempotent).
 
 ### `watch.rs`
-**What it does:** `Watch::new(data)` records `checksum(data)`;
-`Watch::check(data, &GuardState)` recomputes and compares, pollutes the
-state on a mismatch, and — this is the part worth calling out — never
+**What it does:** `Watch::new(data)` records
+`gindema_common::checksum(data)`; `Watch::check(data, &GuardState)`
+recomputes and compares (via `gindema_common::checksums_match`), pollutes
+the state on a mismatch, and — this is the part worth calling out — never
 *un*-pollutes on a match, including a state some other watcher already
 polluted.
 
@@ -96,8 +83,9 @@ alongside one with a visibly different decoy.
   patient attacker single-stepping *between* the two measurement points
   rather than inside the measured code entirely evades it.
 - **FNV-1a is not tamper-resistant against an informed attacker**, only
-  against accidental/casual changes — see `checksum.rs`'s own note. An
-  attacker who can read this crate's source (it's vendored, not secret) and
+  against accidental/casual changes — see `gindema-common`'s own note on
+  `checksum`. An attacker who can read this crate's source (it's vendored,
+  not secret) and
   who controls what they're corrupting a watched region into can construct
   a replacement with a matching checksum.
 - **`GuardState`'s pollution is itself inspectable and, with enough access,
@@ -134,10 +122,11 @@ alongside one with a visibly different decoy.
 ## CI and Workflows
 
 See `.github/workflows/ci.yml` (workspace-wide, workflow_dispatch only).
-`cargo test -p gindema-guard` runs 15 unit tests + 1 doctest; `cargo
-clippy -p gindema-guard --all-targets -- -D warnings` and `cargo fmt -p
-gindema-guard -- --check` are both clean. Verified in the sandbox on Rust
-1.100.
+`cargo test -p gindema-guard` runs 11 unit tests + 1 doctest (down from 15
+— the 4 checksum tests moved to `gindema-common` along with the function
+itself, not lost); `cargo clippy -p gindema-guard --all-targets -- -D
+warnings` and `cargo fmt -p gindema-guard -- --check` are both clean.
+Verified in the sandbox on Rust 1.100.
 
 ## Fixes and Problems
 
@@ -147,3 +136,16 @@ gindema-guard -- --check` are both clean. Verified in the sandbox on Rust
   see that crate's "Fixes and Problems". It would come back if
   `gindema-ptr` integration is later judged worth doing on the grounds
   described above.
+- `checksum.rs` and its 4 tests were deleted from this crate's *tested*
+  tree and moved, unchanged, into `gindema-common`; `watch.rs` now calls
+  `gindema_common::checksum`/`checksums_match` instead. This finally gives
+  `gindema-common`'s long-unused dependency (declared in this crate's
+  `Cargo.toml` since the original scaffold, unused until now) something
+  real to do, and avoids the same checksum implementation existing twice
+  in the workspace now that a second real consumer exists. **One manual
+  step the delivery zip can't do for you:** the zip mechanism only adds or
+  overwrites files, it never removes one from the live repo — after
+  applying this delta, `crates/gindema-guard/src/checksum.rs` will still
+  physically exist there, just unreferenced (`lib.rs` no longer has `mod
+  checksum;`, so it isn't compiled and has zero effect on the build).
+  Delete that one file by hand when convenient.

@@ -12,12 +12,13 @@
 //!
 //! This first pass is a real, working core: [`TimingWindow`] (elapsed-time
 //! checks — the debugger/breakpoint signal), [`Watch`] (byte-region
-//! checksum checks — the "did this change" signal), [`GuardState`] (the
-//! shared, sticky, one-directional pollution flag both of the above write
-//! to), and [`Guarded`] (the decoy-on-pollution read). See
-//! `docs/gindema-guard.md`'s "Known limits" for what a determined,
-//! informed attacker could still do against each of these, and for why
-//! `gindema-ptr` isn't used by any of them yet.
+//! checksum checks — the "did this change" signal, via
+//! [`gindema_common::checksum`]), [`GuardState`] (the shared, sticky,
+//! one-directional pollution flag both of the above write to), and
+//! [`Guarded`] (the decoy-on-pollution read). See `docs/gindema-guard.md`'s
+//! "Known limits" for what a determined, informed attacker could still do
+//! against each of these, and for why `gindema-ptr` isn't used by any of
+//! them yet.
 //!
 //! # Example
 //!
@@ -42,13 +43,11 @@
 //! assert!(!window.elapsed_at_least(Duration::from_secs(5)));
 //! ```
 
-mod checksum;
 mod guarded;
 mod state;
 mod timing;
 mod watch;
 
-pub use checksum::checksum;
 pub use guarded::Guarded;
 pub use state::GuardState;
 pub use timing::TimingWindow;

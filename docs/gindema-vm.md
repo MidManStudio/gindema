@@ -131,23 +131,57 @@ position in the stream, before and after remapping. That means every
 unchanged — there is nothing to recompute, unlike `ProgramBuilder::build`'s
 own two-pass label resolution. The function just walks the stream once:
 decode each opcode field under the *old* map, re-encode under the *new*
-one, copy the operand bits through unchanged, stop at `Halt`.
+one, copy the operand bits through unchanged.
+
+**Walks exactly `Program::code_bit_len` bits — not until the first `Halt`.**
+The original version of this function stopped decoding at the first `Halt`
+opcode it saw, on the reasoning that every program ends in one. That broke
+the first time it met a program containing a `gindema-obfuscate` honeypot:
+a honeypot's dead-end block has its own `Halt`, positioned in the raw byte
+stream *before* the program's real one (even though it's never actually
+reached at runtime — `Vm::run` only gets to a `Halt` by really executing
+there, which this function never does; it just walks bytes front-to-back).
+The old version silently truncated the remap at that point, dropping
+everything genuinely after it. See `program.rs`'s note on
+`code_bit_len` for the fix and why "decode until no bits remain" isn't
+safe either (trailing byte-alignment padding can itself look like a short
+valid instruction).
 
 **Tests:** inline. A real program (with a loop, so jump targets are
 actually exercised) remapped under a deliberately scattered, reversed
 permutation: same byte length, different bytes, and — run through `Vm`
 both ways — identical result. Remapping with the same map the program
 already uses is a byte-for-byte no-op. Remapping to a scrambled map and
-then back to identity recovers the exact original bytes.
+then back to identity recovers the exact original bytes. A dedicated
+regression test reproduces the honeypot-shaped bug directly with
+`ProgramBuilder` (this crate can't depend on `gindema-obfuscate` to use
+its real `inject_honeypot`): an always-taken branch skips over dead code
+containing its own `Halt`, followed by real, reachable code — remapping
+and then running it must still reach that real code, not stop at the dead
+`Halt`.
 
 ### `program.rs`
 **What it does:** `Instr` (the builder's intermediate instruction
 representation — jump operands are `LabelId`s here, not yet bit offsets),
 `LabelId`, `BuildError`, `Program` (the assembled result: bit-packed `code`,
-`constants`, `local_count`, and — added alongside `opcode_map.rs` — the
-`OpcodeMap` the stream was encoded with, plus `code_bytes()`/`opcode_map()`
-accessors for passes like `remap_program` that transform an already-built
-program), and `ProgramBuilder`.
+`constants`, `local_count`, the `OpcodeMap` the stream was encoded with,
+and — added alongside the fix described in `remap.rs`'s section above —
+`code_bit_len`: the exact real bit length of `code`, as opposed to
+`code.len() * 8`, which also counts trailing byte-alignment padding.
+`code_bytes()`/`opcode_map()`/`code_bit_len()` are accessors for passes
+like `remap_program` that transform an already-built program), and
+`ProgramBuilder`.
+
+**Why `code_bit_len` has to be tracked explicitly, not inferred:** a pass
+that walks every instruction without following control flow (unlike
+`Vm::run`, which always does) has no reliable way to tell where real
+content ends otherwise. Stopping at the first `Halt` is wrong once dead
+code can contain one earlier in the stream (see `remap.rs`). Stopping only
+when no bits remain is *also* wrong: `BitWriter::into_bytes`'s trailing
+zero-padding, up to 7 bits, can itself be long enough to misdecode as a
+short, spurious instruction. `ProgramBuilder::build` already computes the
+real bit length in its first pass (to resolve labels) — it was simply
+being discarded afterward; now it's kept.
 
 **Design — two-pass label resolution instead of back-patching:** a jump
 target isn't always known when the jump instruction is emitted (a forward
@@ -220,6 +254,41 @@ an intentionally infinite loop (`jump` to its own label) hitting
 `StepLimitExceeded` rather than hanging the test; invalid constant-pool and
 local-slot indices both reported with the offending index in the error.
 
+### `serialize.rs`
+**What it does:** `Program::to_bytes(&self) -> Vec<u8>` /
+`Program::from_bytes(&[u8]) -> Result<Program, SerializeError>` — a
+self-contained binary file format: magic `b"GVMP"`, a `u16` version, the
+`local_count` byte, `code_bit_len` as a little-endian `u64`, the opcode
+table as `OPCODE_COUNT` raw bytes (one per `OpCode::ALL` entry — enough on
+its own to rebuild the full `OpcodeMap` via `from_permutation`), the
+constant pool (a `u32` count, then each value as a 1-byte type tag plus an
+8-byte little-endian payload, or 1 byte for `Bool`), then the bytecode
+itself (a `u32` length, then that many bytes). Little-endian and
+byte-aligned throughout — deliberately not bit-packed the way `code`
+itself is; there's no reason for the *container* around an already
+bit-packed stream to also be bit-level, and byte alignment makes the
+format easier to read by eye in a hex dump.
+
+This is what makes a `Program` persistable at all — without it, a program
+only ever exists for the lifetime of one process. `gindema-cli`'s `demo`/
+`info`/`run`/`remap` subcommands all go through this.
+
+A small private `ByteReader` (this file only — not a general-purpose
+binary-parsing library, since this format has exactly one reader and one
+writer and both live here and change together) reads length-prefixed
+fields and reports `SerializeError::UnexpectedEof` rather than panicking
+on a truncated buffer.
+
+**Tests:** inline. Round-trips a program containing all three `Value`
+kinds (`to_bytes` then `from_bytes` gives back an equal `Program`, and
+running both gives the same result); round-trips a *remapped* program's
+non-identity opcode table specifically, not just the identity case; wrong
+magic, an unsupported version, an invalid constant type tag, and a
+corrupted (duplicate-raw-value) opcode table are all rejected with the
+right `SerializeError` variant; truncating the byte buffer at every
+possible length is rejected with `UnexpectedEof` rather than panicking
+(not just one hand-picked truncation point).
+
 ## Known limits (intentional, for this pass)
 
 - No functions or calls — no call stack, no `Call`/`Return` opcodes. Every
@@ -241,12 +310,30 @@ local-slot indices both reported with the offending index in the error.
 ## CI and Workflows
 
 See `.github/workflows/ci.yml` (workspace-wide, workflow_dispatch only).
-`cargo test -p gindema-vm` runs 31 unit tests + 1 doctest; `cargo clippy -p
+`cargo test -p gindema-vm` runs 39 unit tests + 1 doctest; `cargo clippy -p
 gindema-vm --all-targets -- -D warnings` and `cargo fmt -p gindema-vm --
 --check` are both clean. Verified in the sandbox on Rust 1.100.
 
 ## Fixes and Problems
 
+- **Real bug, caught by `gindema-cli`'s own tests, not this crate's own:**
+  `remap_program` originally stopped decoding at the first `Halt` opcode.
+  The first time a program containing a `gindema-obfuscate` honeypot was
+  remapped (via `gindema-cli demo --honeypots 1` followed by `remap`), this
+  silently truncated the output at the honeypot's own dead-end `Halt` —
+  which sits earlier in the raw byte stream than the program's real one,
+  even though it's never actually reached at runtime — dropping every real
+  instruction after it. Fixed by adding `Program::code_bit_len` (the exact
+  real bit length, already computed by `ProgramBuilder::build`'s label-
+  resolution pass but previously discarded) and having `remap_program`
+  decode exactly that many bits instead of watching for `Halt`. A
+  regression test reproducing the exact shape (branch always skips over
+  dead code containing its own `Halt`, followed by real code) was added
+  directly in `remap.rs`'s own tests, using plain `ProgramBuilder` (this
+  crate can't depend on `gindema-obfuscate` for its real `inject_honeypot`
+  without a dependency cycle). `Program::to_bytes`/`from_bytes` were
+  updated in the same change to persist `code_bit_len`, since it's now part
+  of what a program *is*, not an optional extra.
 - `value.rs`'s arithmetic methods were originally named to mirror the
   opcodes (`add`, `sub`, `mul`, `div`, `neg`, `not`, `lt`) and clippy's
   `should_implement_trait` flagged all seven — renamed to `try_*`; see that

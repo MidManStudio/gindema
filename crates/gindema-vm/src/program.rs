@@ -131,6 +131,12 @@ impl std::error::Error for BuildError {}
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
     pub(crate) code: Vec<u8>,
+    /// The exact bit length of real instruction content in `code`, as
+    /// opposed to `code.len() * 8`, which also counts
+    /// [`gindema_bits::BitWriter::into_bytes`]'s trailing zero-padding up to
+    /// the next byte boundary. See [`Program::code_bit_len`] for why this
+    /// is tracked explicitly instead of inferred.
+    pub(crate) code_bit_len: u64,
     pub(crate) constants: Vec<Value>,
     pub(crate) local_count: u8,
     pub(crate) opcode_map: OpcodeMap,
@@ -151,6 +157,23 @@ impl Program {
     /// byte-alignment padding).
     pub fn code_len_bytes(&self) -> usize {
         self.code.len()
+    }
+
+    /// The exact bit length of this program's real instruction content —
+    /// `code_bytes().len() * 8` minus whatever trailing zero-padding bits
+    /// [`gindema_bits::BitWriter::into_bytes`] added to reach a byte
+    /// boundary.
+    ///
+    /// A pass that walks every instruction front-to-back without following
+    /// control flow (like [`crate::remap_program`]) needs this to know
+    /// exactly where real content ends: stopping at the first `Halt`
+    /// opcode is wrong once dead code (a `gindema-obfuscate` honeypot, for
+    /// instance) can contain its own `Halt` earlier in the stream than the
+    /// program's real one, and stopping only when no bits remain risks
+    /// misreading leftover padding bits as a phantom instruction. Decoding
+    /// up to exactly this many bits avoids both.
+    pub fn code_bit_len(&self) -> u64 {
+        self.code_bit_len
     }
 
     /// The raw, bit-packed instruction stream. Exposed for passes that
@@ -376,6 +399,7 @@ impl ProgramBuilder {
 
         Ok(Program {
             code: writer.into_bytes(),
+            code_bit_len: total_bits,
             constants,
             local_count: self.local_count,
             opcode_map: OpcodeMap::identity(),

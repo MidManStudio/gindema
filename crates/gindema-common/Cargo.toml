@@ -8,3 +8,6 @@ description = "Shared error types, traits, and small utilities used across the g
 publish = false
 
 [dependencies]
+
+[lints]
+workspace = true

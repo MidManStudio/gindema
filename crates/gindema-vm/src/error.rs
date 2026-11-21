@@ -7,6 +7,8 @@ use std::fmt;
 
 use gindema_bits::BitsError;
 
+use crate::opcode_map::OpcodeMapError;
+
 /// Everything that can go wrong running a [`crate::Program`] on a [`crate::Vm`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum VmError {
@@ -60,5 +62,48 @@ impl std::error::Error for VmError {}
 impl From<BitsError> for VmError {
     fn from(e: BitsError) -> Self {
         Self::Bits(e)
+    }
+}
+
+/// Everything that can go wrong parsing a serialized [`crate::Program`]
+/// back from bytes ([`crate::Program::from_bytes`]). Kept separate from
+/// [`VmError`]: parsing a file and running an already-built program are
+/// different concerns, and a caller that loads a program and then runs it
+/// shouldn't have to tell a parse failure apart from a runtime one by
+/// pattern-matching a single combined enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SerializeError {
+    /// The data didn't start with the expected 4-byte magic.
+    InvalidMagic,
+    /// The data declared a format version this crate doesn't know how to
+    /// read.
+    UnsupportedVersion(u16),
+    /// The data ended before a complete program was read.
+    UnexpectedEof,
+    /// A constant's type tag byte wasn't one this crate defines.
+    InvalidValueTag(u8),
+    /// The stored opcode permutation was invalid (see [`OpcodeMapError`]) —
+    /// implies the data was corrupted or hand-edited, since
+    /// [`crate::Program::to_bytes`] never writes one that isn't valid.
+    OpcodeMap(OpcodeMapError),
+}
+
+impl fmt::Display for SerializeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidMagic => write!(f, "not a gindema-vm program file (bad magic)"),
+            Self::UnsupportedVersion(v) => write!(f, "unsupported program file version {v}"),
+            Self::UnexpectedEof => write!(f, "program file ended unexpectedly"),
+            Self::InvalidValueTag(t) => write!(f, "invalid constant type tag {t}"),
+            Self::OpcodeMap(e) => write!(f, "invalid opcode table in program file: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for SerializeError {}
+
+impl From<OpcodeMapError> for SerializeError {
+    fn from(e: OpcodeMapError) -> Self {
+        Self::OpcodeMap(e)
     }
 }
