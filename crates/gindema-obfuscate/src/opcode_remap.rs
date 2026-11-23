@@ -7,7 +7,7 @@ use std::fmt;
 
 use gindema_vm::{remap_program, OpcodeMap, Program, VmError, OPCODE_COUNT};
 
-use crate::rng::SplitMix64;
+use gindema_common::SplitMix64;
 
 /// Everything that can go wrong remapping a program's opcode table.
 ///
@@ -65,7 +65,7 @@ fn random_raw_values(rng: &mut SplitMix64) -> [u8; OPCODE_COUNT] {
 
 /// Builds a random, non-identity [`OpcodeMap`] from `seed`. Same `seed` →
 /// same map, always — this is a build-reproducibility property, not a
-/// security one (see `rng.rs`'s own notes on why SplitMix64 was chosen).
+/// security one (see `gindema_common::SplitMix64`'s own notes on why).
 pub fn random_opcode_map(seed: u64) -> OpcodeMap {
     let mut rng = SplitMix64::new(seed);
     let raw_values = random_raw_values(&mut rng);

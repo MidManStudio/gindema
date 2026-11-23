@@ -5,7 +5,7 @@
 
 use gindema_vm::{BuildError, ProgramBuilder, Value};
 
-use crate::rng::SplitMix64;
+use gindema_common::SplitMix64;
 
 /// Emits a honeypot/dead-end block into `builder` at the current position:
 /// a conditional branch that looks like real logic but is always taken the

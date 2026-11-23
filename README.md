@@ -17,13 +17,21 @@ yet control-flow flattening or state-dependent decoding. `gindema-guard`
 has its first real pass too — timing/checksum watchdog plus
 pollution-state reads, see `docs/gindema-guard.md` for real limits — but
 doesn't use `gindema-ptr` yet and isn't wired into anything.
-`gindema-common` finally has something real in it (a shared checksum, used
-by `gindema-guard`), though not yet the shared error types/traits its own
+`gindema-common` has two real things in it now (a shared checksum, used by
+`gindema-guard`; a shared `SplitMix64`, used by `gindema-obfuscate` and
+`gindema-container`), though not yet the shared error types/traits its own
 description names. `gindema-cli` is a real, working `demo`/`info`/`run`/
 `remap` pipeline, with one load-bearing gap: there is still no assembly
 language, so `demo` is the only way to get a program file at all — see
-`docs/gindema-cli.md`. `gindema-container` is still scaffold stage: crate
-structure is real, the logic inside isn't written yet.
+`docs/gindema-cli.md`. `gindema-container` is implemented too: an
+encrypted asset archive built on `dixscript`'s real AES-256-GCM/gzip
+primitives (not its AST-driven pipeline — see `docs/gindema-container.md`
+for why), with honeypot slots and lazy per-asset decryption. Building and
+testing it means `dixscript`'s own crypto code actually ran in the
+sandbox, a deliberate departure from this project's earlier "don't execute
+DixScript-Rust" practice — flagged prominently in that doc rather than
+done quietly, and **not yet confirmed against the real GitHub Actions
+workflow**.
 `mirage-ffmpeg` and `mirage-cli` are also still scaffold stage. `pixelflip-*`
 is real and working. `mirage-core` (pattern format and frame application)
 and `mirage-train` (offline training and evaluation against CLIP) are

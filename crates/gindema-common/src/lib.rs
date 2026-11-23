@@ -13,5 +13,7 @@
 //! naming them.
 
 mod checksum;
+mod rng;
 
 pub use checksum::{checksum, checksums_match};
+pub use rng::SplitMix64;

@@ -10,3 +10,7 @@ publish = false
 [dependencies]
 gindema-common = { path = "../gindema-common" }
 dixscript = "1.0"
+base64 = "0.21"
+
+[lints]
+workspace = true

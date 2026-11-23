@@ -4,11 +4,13 @@
 
 Shared error types, traits, and small utilities used across the gindema
 workspace, by both the protection-core crates and the mirage video-poisoning
-crates. This first pass has exactly one thing in it: `checksum`/
-`checksums_match` (FNV-1a, 64-bit), moved here from `gindema-guard` once a
-second plausible consumer made "every crate rolls its own" the wrong call.
-See "Known limits" for why shared error types/traits — named in this
-crate's own `description` in `Cargo.toml` — still don't exist here.
+crates. Two things live here so far, both moved in from a crate that
+originally had its own copy once a second real consumer showed up:
+`checksum`/`checksums_match` (FNV-1a, 64-bit; from `gindema-guard`) and
+`SplitMix64` (a seeded pseudorandom generator; from `gindema-obfuscate`,
+now also used by `gindema-container`). See "Known limits" for why shared
+error types/traits — named in this crate's own `description` in
+`Cargo.toml` — still don't exist here.
 
 ## Modules
 
@@ -30,6 +32,21 @@ that does and doesn't mean for a caller relying on it.
 **Tests:** inline. Same bytes always checksum the same; different bytes
 checksum differently; empty input doesn't panic and equals the FNV offset
 basis; `checksums_match` agrees with plain equality.
+
+### `rng.rs`
+**What it does:** `SplitMix64` — `new(seed)`, `next_u64()`, `next_below(bound)`
+(plain modulo, documented as not perfectly uniform for a non-power-of-two
+bound — an accepted bias, not a cryptographic shuffle), `fill_bytes(count)`
+(non-secret filler content only — never key or nonce material, which needs
+a real CSPRNG). Explicitly not cryptographically secure; used for seeded,
+reproducible *variation* — which opcode numbering a build uses
+(`gindema-obfuscate`), which container slots are decoys and in what order
+(`gindema-container`) — not for anything whose secrecy matters.
+
+**Tests:** inline. Same seed reproduces the same sequence exactly;
+different seeds diverge; `next_below` stays in range across many draws;
+`fill_bytes` returns exactly the requested length (including zero) and is
+itself deterministic for a given seed.
 
 ## Known limits (intentional, for this pass)
 
@@ -56,13 +73,16 @@ basis; `checksums_match` agrees with plain equality.
 ## CI and Workflows
 
 See `.github/workflows/ci.yml` (workspace-wide, workflow_dispatch only).
-`cargo test -p gindema-common` runs 4 unit tests; `cargo clippy -p
-gindema-common --all-targets -- -D warnings` and `cargo fmt -p
-gindema-common -- --check` are both clean. Verified in the sandbox on Rust
-1.100.
+`cargo test -p gindema-common` runs 9 unit tests (4 checksum + 5 rng);
+`cargo clippy -p gindema-common --all-targets -- -D warnings` and `cargo
+fmt -p gindema-common -- --check` are both clean. Verified in the sandbox
+on Rust 1.100.
 
 ## Fixes and Problems
 
-- None from this pass — the content moved over from `gindema-guard`
-  unchanged (same function bodies, same tests), so there was nothing new
-  to get wrong.
+- None from either move — both `checksum` and `SplitMix64` moved over
+  unchanged (same function bodies, same tests) from `gindema-guard` and
+  `gindema-obfuscate` respectively, so there was nothing new to get wrong
+  in either case. `fill_bytes` is new (added alongside the `SplitMix64`
+  move, for `gindema-container`'s honeypot filler — `gindema-obfuscate`
+  never needed it, only `next_u64`/`next_below`).

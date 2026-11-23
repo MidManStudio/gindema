@@ -42,19 +42,6 @@ with a honeypot inlined, runs it, confirms the honeypot was skipped),
 module wiring, flat re-exports (`remap_opcodes`, `random_opcode_map`,
 `ObfuscateError`, `inject_honeypot`).
 
-### `rng.rs`
-**What it does:** `SplitMix64` — the same generator choice `mirage-train`
-made for its own seeded shuffling (see `docs/mirage-train.md`). `next_u64`
-is the textbook SplitMix64 step; `next_below(bound)` is plain modulo, not
-perfectly uniform for a non-power-of-two `bound` — an accepted bias here,
-since this is build-to-build *variation*, not a cryptographic shuffle
-trying to resist a statistical attack. Not exported from the crate (`pub(crate)`
-only) — nothing outside this crate's own obfuscation logic needs a raw RNG.
-
-**Tests:** inline. Same seed reproduces the same sequence exactly; different
-seeds diverge; `next_below` never returns an out-of-range value across 200
-draws.
-
 ### `opcode_remap.rs`
 **What it does:** `random_raw_values` — a partial Fisher-Yates shuffle of a
 64-slot pool, taking the first `OPCODE_COUNT` (17) slots as the new raw
@@ -131,7 +118,8 @@ program all stay unreachable together.
   input, modulo the opcode table itself being scrambled — there's no
   decode-time state machine or junk-byte interleaving yet.
 - **Remap strength:** `SplitMix64` plus modulo-biased sampling is explicitly
-  not cryptographic — see `rng.rs`'s note. The opcode space is also small
+  not cryptographic — see `gindema_common::SplitMix64`'s own note. The
+  opcode space is also small
   (17 opcodes into 64 slots): a determined attacker with the published
   `gindema-cli` binary in hand and some patience could plausibly recover
   the mapping by correlating decoded behavior against known-good test
@@ -167,7 +155,16 @@ Rust 1.100.
 
 ## Fixes and Problems
 
-- None from either pass so far — both designs (mechanism in `gindema-vm`
+- `rng.rs` (`SplitMix64`) was deleted from this crate and moved, unchanged,
+  into `gindema-common` once `gindema-container` needed the identical
+  generator — `opcode_remap.rs`/`honeypot.rs` now call
+  `gindema_common::SplitMix64` instead. Same one-manual-step caveat as
+  `gindema-guard`'s own `checksum.rs` move: the delivery zip can only add
+  or overwrite files, so `crates/gindema-obfuscate/src/rng.rs` will still
+  physically exist in the live repo after this delta, unreferenced
+  (`lib.rs` no longer has `mod rng;`) but harmless. Delete it by hand
+  alongside `gindema-guard`'s leftover `checksum.rs` when convenient.
+- None from either pass before that — both designs (mechanism in `gindema-vm`
   with randomness policy here for opcode remap; entirely within this crate,
   reusing `ProgramBuilder`'s existing API, for honeypot injection) worked
   on the first implementation attempt. Opcode remap is verified by the

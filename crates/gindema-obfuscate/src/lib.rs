@@ -63,7 +63,6 @@
 
 mod honeypot;
 mod opcode_remap;
-mod rng;
 
 pub use honeypot::inject_honeypot;
 pub use opcode_remap::{random_opcode_map, remap_opcodes, ObfuscateError};
