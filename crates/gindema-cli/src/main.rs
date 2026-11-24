@@ -3,11 +3,12 @@
 // live in docs/gindema-cli.md, section "main.rs"
 // ============================================================================
 
-//! The gindema CLI: builds, remaps, runs, and inspects gindema-vm bytecode
-//! program files. See `docs/gindema-cli.md` for what this does and -- just
-//! as importantly -- does not do yet (there is no assembly language, no
-//! build-pipeline integration, and `gindema-guard`/`gindema-container`
-//! aren't used here at all; see that doc's "Known limits" for why).
+//! The gindema CLI: assembles, builds, remaps, runs, and inspects
+//! gindema-vm bytecode program files, and packs/unpacks gindema-container
+//! asset archives. See `docs/gindema-cli.md` for what this does and -- just
+//! as importantly -- does not do yet (no build-pipeline integration, and
+//! `gindema-guard` isn't used here at all; see that doc's "Known limits"
+//! for why).
 
 mod cli;
 mod commands;
@@ -44,6 +45,18 @@ fn main() {
             output,
             seed,
         } => commands::run_remap(&input, &output, seed),
+        Command::Assemble { source, output } => commands::run_assemble(&source, &output),
+        Command::Pack {
+            output,
+            inputs,
+            honeypots,
+            seed,
+        } => commands::run_pack(&output, &inputs, honeypots, seed),
+        Command::Unpack {
+            input,
+            key,
+            output_dir,
+        } => commands::run_unpack(&input, &key, &output_dir),
     };
 
     if let Err(e) = result {

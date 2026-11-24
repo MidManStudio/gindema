@@ -2,6 +2,45 @@
 
 ## [Unreleased]
 
+- **CI confirmed for real.** `ci.yml` was run on the project's actual
+  GitHub Actions for the first time — previously every crate in this
+  workspace, `gindema-container` included, had only ever been
+  sandbox-verified. rustc 1.100.0, commit `f8e0115`: `cargo test
+  --workspace` 189 passed / 0 failed / 0 ignored, `cargo clippy --workspace
+  -- -D warnings` and `cargo fmt --check` both clean.
+- `gindema-vm`: added `assemble(&str) -> Result<Program, AsmError>`
+  (`asm.rs`) — a minimal textual assembly language. Directly closes the
+  gap both `docs/gindema-vm.md` and `docs/gindema-cli.md` flagged as the
+  single biggest one in the workspace: `ProgramBuilder`'s Rust API was
+  previously the only way to construct a `Program` at all. One
+  instruction per line, `;` comments, an optional `.locals N` directive,
+  `name:` labels (every label name is collected before any instruction is
+  emitted, so a forward reference resolves exactly like a backward one),
+  and the same 17 mnemonics as `ProgramBuilder`'s own emitter methods,
+  one-to-one. 19 new unit tests + 1 new doctest (58 + 2 total, up from
+  39 + 1).
+- `gindema-cli`: wired up both `gindema-vm`'s new assembler and
+  `gindema-container`, closing two of the three gaps
+  `docs/gindema-cli.md`'s "Known limits" previously named. New
+  subcommands: `assemble <source> <output>` (compiles a `.gasm` text file
+  via `gindema_vm::assemble` — the first way to get an arbitrary program
+  from the command line; `demo` remains the fixed hardcoded one);
+  `pack <output> <input>... [--honeypots N] [--seed S]` (packs one or more
+  files into a new `gindema-container` archive, generating and printing a
+  fresh key — there is no other way to recover it, so it must be saved
+  now); `unpack <input> --key <BASE64> <output-dir>` (opens an archive and
+  extracts every real asset, named by 0-based order since the container
+  stores no filenames by design — see `docs/gindema-container.md`).
+  `pack_assets`/`unpack_all` kept as pure, filesystem-free functions,
+  mirroring `build_demo_program`'s existing separation of testable logic
+  from I/O. 10 new unit tests (25 total, up from 15); the built binary was
+  also run end-to-end by hand — `assemble` → `info`/`run` → `remap` →
+  `info`/`run` again on a real loop-sum-to-10 program (not just
+  straight-line arithmetic), `pack` → `unpack` with the right key, and
+  `unpack` with a wrong key (both a malformed one and a well-formed-but-
+  incorrect one, to exercise both of `ContainerReader::open`'s failure
+  paths) — not just `cargo test`. `gindema-guard` and `gindema-ptr` remain
+  the only declared-but-unused dependencies.
 - `gindema-common`: gained `SplitMix64` (moved from `gindema-obfuscate`,
   made public, `fill_bytes` added) once `gindema-container` needed the
   identical seeded generator rather than a third copy in the workspace.

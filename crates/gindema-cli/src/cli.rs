@@ -28,6 +28,24 @@ pub enum Command {
         output: PathBuf,
         seed: u64,
     },
+    /// Compiles a gindema-vm assembly text file (see
+    /// `gindema_vm::assemble`) into a program file.
+    Assemble { source: PathBuf, output: PathBuf },
+    /// Packs one or more files into a new gindema-container archive (see
+    /// `commands::pack_assets`), generating and printing a fresh key.
+    Pack {
+        output: PathBuf,
+        inputs: Vec<PathBuf>,
+        honeypots: u32,
+        seed: u64,
+    },
+    /// Opens a gindema-container archive with a given key and extracts
+    /// every real asset into a directory.
+    Unpack {
+        input: PathBuf,
+        key: String,
+        output_dir: PathBuf,
+    },
     /// `--help`, `help`, or no arguments at all.
     Help,
 }
@@ -65,8 +83,84 @@ pub fn parse_args(args: &[String]) -> Result<Command, ArgsError> {
         "info" => parse_single_path(rest, "info").map(|input| Command::Info { input }),
         "run" => parse_single_path(rest, "run").map(|input| Command::Run { input }),
         "remap" => parse_remap(rest),
+        "assemble" => parse_two_paths(rest, "assemble")
+            .map(|(source, output)| Command::Assemble { source, output }),
+        "pack" => parse_pack(rest),
+        "unpack" => parse_unpack(rest),
         other => Err(err(format!("unknown subcommand '{other}' (try 'help')"))),
     }
+}
+
+fn parse_two_paths(rest: &[String], name: &str) -> Result<(PathBuf, PathBuf), ArgsError> {
+    match rest {
+        [a, b] => Ok((PathBuf::from(a), PathBuf::from(b))),
+        _ => Err(err(format!(
+            "'{name}' needs exactly an input and an output file path"
+        ))),
+    }
+}
+
+fn parse_pack(rest: &[String]) -> Result<Command, ArgsError> {
+    let mut positionals = Vec::new();
+    let mut honeypots = 0u32;
+    let mut seed = 0u64;
+    let mut iter = rest.iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--honeypots" => honeypots = parse_u64_flag(&mut iter, "--honeypots")? as u32,
+            "--seed" => seed = parse_u64_flag(&mut iter, "--seed")?,
+            _ if arg.starts_with("--") => {
+                return Err(err(format!("unknown flag '{arg}' for 'pack'")))
+            }
+            path => positionals.push(path),
+        }
+    }
+    let [output, inputs @ ..] = positionals.as_slice() else {
+        return Err(err(
+            "'pack' needs an output path and at least one input file",
+        ));
+    };
+    if inputs.is_empty() {
+        return Err(err("'pack' needs at least one input file"));
+    }
+    Ok(Command::Pack {
+        output: PathBuf::from(output),
+        inputs: inputs.iter().map(PathBuf::from).collect(),
+        honeypots,
+        seed,
+    })
+}
+
+fn parse_unpack(rest: &[String]) -> Result<Command, ArgsError> {
+    let mut positionals = Vec::new();
+    let mut key = None;
+    let mut iter = rest.iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--key" => {
+                key = Some(
+                    iter.next()
+                        .ok_or_else(|| err("--key needs a value"))?
+                        .clone(),
+                )
+            }
+            _ if arg.starts_with("--") => {
+                return Err(err(format!("unknown flag '{arg}' for 'unpack'")))
+            }
+            path => positionals.push(path),
+        }
+    }
+    let [input, output_dir] = positionals.as_slice() else {
+        return Err(err(
+            "'unpack' needs exactly an input archive and an output directory",
+        ));
+    };
+    let key = key.ok_or_else(|| err("'unpack' needs --key <BASE64>"))?;
+    Ok(Command::Unpack {
+        input: PathBuf::from(input),
+        key,
+        output_dir: PathBuf::from(output_dir),
+    })
 }
 
 fn parse_single_path(rest: &[String], name: &str) -> Result<PathBuf, ArgsError> {
@@ -138,17 +232,21 @@ fn parse_u64_flag<'a>(
 /// Printed by `Command::Help` and by a parse error that's about overall
 /// usage rather than one bad flag.
 pub const USAGE: &str = "\
-gindema-cli: build, remap, run, and inspect gindema-vm bytecode programs.
+gindema-cli: assemble, build, remap, run, and inspect gindema-vm bytecode
+programs, and pack/unpack gindema-container asset archives.
 
-There is no assembly language yet (see docs/gindema-cli.md) -- 'demo'
-builds a fixed built-in program so the rest of this tool has something
-real to work on.
+'demo' still builds a fixed built-in program; 'assemble' compiles an
+arbitrary gindema-vm assembly text file instead (see docs/gindema-cli.md
+and gindema_vm::assemble for the syntax).
 
 USAGE:
     gindema-cli demo <output> [--honeypots N] [--seed S]
+    gindema-cli assemble <source> <output>
     gindema-cli info <input>
     gindema-cli run <input>
     gindema-cli remap <input> <output> --seed <S>
+    gindema-cli pack <output> <input>... [--honeypots N] [--seed S]
+    gindema-cli unpack <input> --key <BASE64> <output-dir>
     gindema-cli help
 ";
 
@@ -269,6 +367,100 @@ mod tests {
             "out.gvm".to_string(),
             "--seed".to_string(),
             "not-a-number".to_string(),
+        ];
+        assert!(parse_args(&args).is_err());
+    }
+
+    #[test]
+    fn assemble_needs_exactly_a_source_and_an_output_path() {
+        assert_eq!(
+            parse_args(&[
+                "assemble".to_string(),
+                "prog.gasm".to_string(),
+                "prog.gvm".to_string(),
+            ])
+            .unwrap(),
+            Command::Assemble {
+                source: PathBuf::from("prog.gasm"),
+                output: PathBuf::from("prog.gvm"),
+            }
+        );
+        assert!(parse_args(&["assemble".to_string(), "prog.gasm".to_string()]).is_err());
+        assert!(parse_args(&["assemble".to_string()]).is_err());
+    }
+
+    #[test]
+    fn pack_with_no_flags_and_one_input() {
+        let args = vec![
+            "pack".to_string(),
+            "out.gctn".to_string(),
+            "asset.bin".to_string(),
+        ];
+        assert_eq!(
+            parse_args(&args).unwrap(),
+            Command::Pack {
+                output: PathBuf::from("out.gctn"),
+                inputs: vec![PathBuf::from("asset.bin")],
+                honeypots: 0,
+                seed: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn pack_with_multiple_inputs_and_flags() {
+        let args = vec![
+            "pack".to_string(),
+            "out.gctn".to_string(),
+            "a.bin".to_string(),
+            "b.bin".to_string(),
+            "--honeypots".to_string(),
+            "4".to_string(),
+            "--seed".to_string(),
+            "7".to_string(),
+        ];
+        assert_eq!(
+            parse_args(&args).unwrap(),
+            Command::Pack {
+                output: PathBuf::from("out.gctn"),
+                inputs: vec![PathBuf::from("a.bin"), PathBuf::from("b.bin")],
+                honeypots: 4,
+                seed: 7,
+            }
+        );
+    }
+
+    #[test]
+    fn pack_missing_output_or_inputs_errors() {
+        assert!(parse_args(&["pack".to_string()]).is_err());
+        assert!(parse_args(&["pack".to_string(), "out.gctn".to_string()]).is_err());
+    }
+
+    #[test]
+    fn unpack_needs_a_key_and_two_paths() {
+        let args = vec![
+            "unpack".to_string(),
+            "archive.gctn".to_string(),
+            "--key".to_string(),
+            "c29tZS1rZXk=".to_string(),
+            "out-dir".to_string(),
+        ];
+        assert_eq!(
+            parse_args(&args).unwrap(),
+            Command::Unpack {
+                input: PathBuf::from("archive.gctn"),
+                key: "c29tZS1rZXk=".to_string(),
+                output_dir: PathBuf::from("out-dir"),
+            }
+        );
+    }
+
+    #[test]
+    fn unpack_without_key_errors() {
+        let args = vec![
+            "unpack".to_string(),
+            "archive.gctn".to_string(),
+            "out-dir".to_string(),
         ];
         assert!(parse_args(&args).is_err());
     }

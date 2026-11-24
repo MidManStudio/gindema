@@ -6,8 +6,9 @@
 use std::error::Error;
 use std::path::Path;
 
+use gindema_container::{ContainerBuilder, ContainerError, ContainerKey, ContainerReader};
 use gindema_obfuscate::{inject_honeypot, remap_opcodes};
-use gindema_vm::{OpcodeMap, Program, ProgramBuilder, Value, Vm};
+use gindema_vm::{assemble, OpcodeMap, Program, ProgramBuilder, Value, Vm};
 
 /// Builds the one fixed demo program this crate ships: sums `1..=10` via a
 /// real loop (so there's a jump target worth exercising), into local slot
@@ -127,6 +128,107 @@ pub fn run_remap(input: &Path, output: &Path, seed: u64) -> Result<(), Box<dyn E
     Ok(())
 }
 
+/// `assemble <source> <output>`: compiles a gindema-vm assembly text file
+/// (see `gindema_vm::assemble`) into a program file. The first way to get
+/// an arbitrary program from the command line -- previously `demo` was the
+/// only way to get a program file at all (see `docs/gindema-cli.md`'s
+/// former "Known limits").
+pub fn run_assemble(source: &Path, output: &Path) -> Result<(), Box<dyn Error>> {
+    let text = std::fs::read_to_string(source)?;
+    let program = assemble(&text)?;
+    let bytes = program.to_bytes();
+    std::fs::write(output, &bytes)?;
+    println!(
+        "wrote {} ({} bytes) from {}",
+        output.display(),
+        bytes.len(),
+        source.display(),
+    );
+    Ok(())
+}
+
+/// Packs `assets` (already-read bytes, in order) into a new archive under a
+/// freshly generated key. Kept separate from `run_pack`'s file I/O so the
+/// packing logic itself is unit-testable without touching the filesystem,
+/// mirroring `build_demo_program` above.
+pub fn pack_assets(
+    assets: &[Vec<u8>],
+    honeypot_count: u32,
+    seed: u64,
+) -> Result<(ContainerKey, Vec<u8>), ContainerError> {
+    let mut builder = ContainerBuilder::new();
+    for asset in assets {
+        builder.add_asset(asset.clone())?;
+    }
+    let key = ContainerKey::generate();
+    let archive = builder.build(&key, honeypot_count, seed)?;
+    Ok((key, archive))
+}
+
+/// Extracts every real asset from an already-built archive, in order. Kept
+/// separate from `run_unpack`'s file I/O for the same reason as
+/// `pack_assets`.
+pub fn unpack_all(data: &[u8], key: ContainerKey) -> Result<Vec<Vec<u8>>, ContainerError> {
+    let reader = ContainerReader::open(data, key)?;
+    (0..reader.asset_count() as u32)
+        .map(|order| reader.read_asset(order))
+        .collect()
+}
+
+/// `pack <output> <input>... [--honeypots N] [--seed S]`: packs one or more
+/// files into a new gindema-container archive via `pack_assets`. Generates
+/// a fresh key and prints it -- there is no other way to get it back, so it
+/// must be saved now to unpack later.
+pub fn run_pack(
+    output: &Path,
+    inputs: &[std::path::PathBuf],
+    honeypot_count: u32,
+    seed: u64,
+) -> Result<(), Box<dyn Error>> {
+    let mut assets = Vec::with_capacity(inputs.len());
+    for input in inputs {
+        assets.push(std::fs::read(input)?);
+        println!("  added {}", input.display());
+    }
+    let (key, archive) = pack_assets(&assets, honeypot_count, seed)?;
+    std::fs::write(output, &archive)?;
+    println!(
+        "wrote {} ({} bytes, {} real asset(s), {honeypot_count} honeypot(s))",
+        output.display(),
+        archive.len(),
+        inputs.len(),
+    );
+    println!(
+        "key (save this -- it's the only way to unpack): {}",
+        key.to_base64()
+    );
+    Ok(())
+}
+
+/// `unpack <input> --key <BASE64> <output-dir>`: opens an archive via
+/// `unpack_all` and writes every real asset to `output_dir`. The container
+/// stores no filenames by design (see `docs/gindema-container.md`'s "Known
+/// limits"), so extracted files are named by their 0-based asset order, not
+/// an original name.
+pub fn run_unpack(input: &Path, key_b64: &str, output_dir: &Path) -> Result<(), Box<dyn Error>> {
+    let data = std::fs::read(input)?;
+    let key = ContainerKey::from_base64(key_b64)?;
+    let assets = unpack_all(&data, key)?;
+    std::fs::create_dir_all(output_dir)?;
+    for (order, bytes) in assets.iter().enumerate() {
+        let path = output_dir.join(format!("asset-{order:04}.bin"));
+        std::fs::write(&path, bytes)?;
+        println!("  wrote {}", path.display());
+    }
+    println!(
+        "extracted {} asset(s) from {} into {} (filenames aren't stored -- see docs/gindema-container.md)",
+        assets.len(),
+        input.display(),
+        output_dir.display(),
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -174,5 +276,39 @@ mod tests {
         assert_ne!(remapped.code_bytes(), program.code_bytes());
         let mut vm = Vm::new();
         assert_eq!(vm.run(&remapped).unwrap(), Some(Value::Int(55)));
+    }
+
+    #[test]
+    fn assembling_text_produces_a_program_that_runs() {
+        let program = assemble("load_const 6\nload_const 7\nmul\nhalt\n").unwrap();
+        let mut vm = Vm::new();
+        assert_eq!(vm.run(&program).unwrap(), Some(Value::Int(42)));
+    }
+
+    #[test]
+    fn pack_then_unpack_round_trips_the_original_assets() {
+        let assets = vec![
+            b"pretend this is texture data".to_vec(),
+            b"pretend this is sound data, a bit longer".to_vec(),
+        ];
+        let (key, archive) = pack_assets(&assets, 3, 42).unwrap();
+        let restored = unpack_all(&archive, key).unwrap();
+        assert_eq!(restored, assets);
+    }
+
+    #[test]
+    fn honeypots_dont_change_which_assets_come_back_or_their_order() {
+        let assets = vec![b"a".to_vec(), b"bb".to_vec(), b"ccc".to_vec()];
+        let (key, archive) = pack_assets(&assets, 5, 7).unwrap();
+        let restored = unpack_all(&archive, key).unwrap();
+        assert_eq!(restored, assets);
+    }
+
+    #[test]
+    fn unpacking_with_the_wrong_key_fails() {
+        let assets = vec![b"only asset".to_vec()];
+        let (_key, archive) = pack_assets(&assets, 0, 1).unwrap();
+        let wrong_key = ContainerKey::generate();
+        assert!(unpack_all(&archive, wrong_key).is_err());
     }
 }

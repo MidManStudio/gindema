@@ -16,7 +16,8 @@
 //! This first pass is deliberately scoped to a correct, safe, well-tested
 //! core rather than a complete one: see `docs/gindema-vm.md`'s "Known
 //! limits" for what's intentionally not here yet (functions/calls, more
-//! value types, an assembly syntax, any obfuscation).
+//! value types, any obfuscation). A textual assembly syntax now exists
+//! ([`assemble`]) -- see its own module docs for the syntax.
 //!
 //! # Example
 //!
@@ -41,6 +42,7 @@
 //! assert_eq!(vm.run(&program).unwrap(), Some(Value::Int(20)));
 //! ```
 
+mod asm;
 mod error;
 mod opcode;
 mod opcode_map;
@@ -50,6 +52,7 @@ mod serialize;
 mod value;
 mod vm;
 
+pub use asm::{assemble, AsmError};
 pub use error::{SerializeError, VmError};
 pub use opcode::{
     OpCode, CONST_INDEX_WIDTH, JUMP_TARGET_WIDTH, LOCAL_SLOT_WIDTH, OPCODE_COUNT, OPCODE_WIDTH,

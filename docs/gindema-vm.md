@@ -30,6 +30,14 @@ flattening, state-dependent decoding, and honeypot/dead-end injection
 remain entirely `gindema-obfuscate`'s, with no corresponding support here
 yet.
 
+**A textual assembly language now exists** (`asm.rs`, `assemble`) — see
+that module's own doc comment for the syntax. This closes what was,
+through the previous several sessions, the single biggest gap flagged in
+both this doc and `docs/gindema-cli.md`: `ProgramBuilder`'s Rust API was
+the only way to construct a `Program` at all, which is why `gindema-cli`'s
+`demo` subcommand had to hardcode one fixed program. `gindema-cli`'s new
+`assemble` subcommand is a thin wrapper around this.
+
 ## Instruction set
 
 17 opcodes, 0-16 (see `opcode.rs` for the exact encoding and bit widths):
@@ -47,6 +55,54 @@ this pass (see "Known limits" below).
 ### `lib.rs`
 **What it does:** crate doc (with a runnable `(2 + 3) * 4` example), module
 wiring, flat re-exports.
+
+### `asm.rs`
+**What it does:** `assemble(&str) -> Result<Program, AsmError>` and
+`AsmError`. A minimal textual assembly language: one instruction per line,
+`;` line comments, an optional `.locals N` directive (defaults to `0`),
+`name:` labels, and the same 17 mnemonics as `ProgramBuilder`'s emitter
+methods (`halt`, `pop`, `dup`, `swap`, `add`, `sub`, `mul`, `div`, `neg`,
+`not`, `eq`, `lt`, `load_const <literal>`, `load_local <slot>`,
+`store_local <slot>`, `jump <label>`, `jump_if_false <label>`) — see the
+module's own doc comment (reproduced in the doctest below) for the full
+syntax.
+
+**Two-pass label resolution, text-level:** every `name:` definition is
+collected into a set before any instruction is parsed into a builder call,
+and every `jump`/`jump_if_false` target is checked against that set before
+`ProgramBuilder` is ever touched. A label used before its definition
+(`jump end` on line 1, `end:` on line 20) therefore resolves exactly the
+same way a backward reference does — there's no "forward declaration"
+concept to learn. This also means `ProgramBuilder::build`'s own
+`UnresolvedLabel` error can never actually surface from assembled source
+(every label this assembler creates via `new_label()` is always placed),
+which is why `AsmError::Build` is documented as being, in practice, only
+`TooManyConstants`/`ProgramTooLarge`.
+
+**No constant-pool deduplication.** Each `load_const <literal>` calls
+`add_const` fresh, even if the exact same value already has a pool entry
+from an earlier line in the same source. Simpler, and the 16-bit pool
+(65,536 entries) is nowhere near a practical concern for anything written
+by hand; a real compiler sitting on top of this (there is none yet) would
+be the natural place to add deduplication if it ever matters.
+
+**One label per line.** `foo: bar: halt` is not supported — the line
+splits on the *first* `:` only, so a second label on the same line
+becomes part of the instruction text and fails as an unknown mnemonic.
+Documented rather than special-cased; writing each label on its own line
+is one keystroke, not a real limitation in practice.
+
+**Tests:** inline. The lib-doc `(2+3)*4` expression and the loop-sum-1..10
+program (both also exercised as doctests — the latter is the same logic
+as `gindema-cli`'s `build_demo_program`, written as text instead of Rust);
+a forward label reference; a label and instruction sharing one line;
+comments and blank lines being ignored; `load_const` parsing int/float/
+bool literals; the `.locals` default and an explicit value; every error
+variant (unknown directive, duplicate `.locals`, unknown mnemonic,
+undefined label, duplicate label, missing/too-many operands including the
+zero-operand case, an invalid literal and an out-of-range slot index); a
+`BuildError::TooManyConstants` propagating through as `AsmError::Build`;
+and a full `to_bytes`/`from_bytes` round trip of an assembled program.
 
 ### `error.rs`
 **What it does:** `VmError` — `StackUnderflow`, `TypeMismatch`,
@@ -294,8 +350,11 @@ possible length is rejected with `UnexpectedEof` rather than panicking
 - No functions or calls — no call stack, no `Call`/`Return` opcodes. Every
   program is one flat instruction stream.
 - No strings, arrays, or heap objects — `Value` is `Int`/`Float`/`Bool` only.
-- No assembly syntax or disassembler — programs are built and inspected only
-  through `ProgramBuilder`'s own API.
+- No disassembler — `assemble` goes one way (text to `Program`); there's no
+  way to go back from a `Program` to readable assembly text yet, only
+  `gindema-cli info`'s coarse byte/constant/local-count summary.
+- `assemble`'s own known limits (no constant-pool deduplication, one label
+  per line) are documented on that module above, not repeated here.
 - `ProgramBuilder::build` always produces the identity `OpcodeMap` — this
   crate never randomizes a program's own numbering on its own. The
   mechanism to re-encode under a different map exists (`remap_program`),
@@ -310,9 +369,13 @@ possible length is rejected with `UnexpectedEof` rather than panicking
 ## CI and Workflows
 
 See `.github/workflows/ci.yml` (workspace-wide, workflow_dispatch only).
-`cargo test -p gindema-vm` runs 39 unit tests + 1 doctest; `cargo clippy -p
-gindema-vm --all-targets -- -D warnings` and `cargo fmt -p gindema-vm --
---check` are both clean. Verified in the sandbox on Rust 1.100.
+`cargo test -p gindema-vm` runs 58 unit tests + 2 doctests (up from 39 + 1,
+the new ones all in `asm.rs`); `cargo clippy -p gindema-vm --all-targets --
+-D warnings` and `cargo fmt -p gindema-vm -- --check` are both clean.
+Verified in the sandbox on Rust 1.100, and this crate is part of the
+workspace-wide `cargo test`/`clippy`/`fmt` that `ci.yml` has now actually
+run successfully on the real GitHub Actions runner (commit `f8e0115`) —
+see the root `README.md`/`CHANGELOG.md` for that confirmation.
 
 ## Fixes and Problems
 

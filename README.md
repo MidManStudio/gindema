@@ -8,10 +8,12 @@ Protection core: `gindema-ptr` (vendored type-erased pointer primitives),
 `gindema-bits` (bit-level stream I/O — see `docs/gindema-bits.md` for why
 this ended up written fresh rather than literally vendored), and
 `gindema-vm` (the baseline bytecode interpreter, with `OpcodeMap`/
-`remap_program` for per-build remapping and `Program::to_bytes`/
-`from_bytes` for persisting a program to a file) are implemented and
-tested. `gindema-obfuscate` has two of its four passes — per-build opcode
-remap and honeypot/dead-end injection, see `docs/gindema-obfuscate.md`
+`remap_program` for per-build remapping, `Program::to_bytes`/`from_bytes`
+for persisting a program to a file, and now `assemble` — a minimal textual
+assembly language, so a program no longer has to be built by calling
+`ProgramBuilder` methods directly in Rust) are implemented and tested.
+`gindema-obfuscate` has two of its four passes — per-build opcode remap
+and honeypot/dead-end injection, see `docs/gindema-obfuscate.md`
 (including honest limits on how strong each one currently is) — but not
 yet control-flow flattening or state-dependent decoding. `gindema-guard`
 has its first real pass too — timing/checksum watchdog plus
@@ -20,18 +22,22 @@ doesn't use `gindema-ptr` yet and isn't wired into anything.
 `gindema-common` has two real things in it now (a shared checksum, used by
 `gindema-guard`; a shared `SplitMix64`, used by `gindema-obfuscate` and
 `gindema-container`), though not yet the shared error types/traits its own
-description names. `gindema-cli` is a real, working `demo`/`info`/`run`/
-`remap` pipeline, with one load-bearing gap: there is still no assembly
-language, so `demo` is the only way to get a program file at all — see
-`docs/gindema-cli.md`. `gindema-container` is implemented too: an
-encrypted asset archive built on `dixscript`'s real AES-256-GCM/gzip
-primitives (not its AST-driven pipeline — see `docs/gindema-container.md`
-for why), with honeypot slots and lazy per-asset decryption. Building and
-testing it means `dixscript`'s own crypto code actually ran in the
-sandbox, a deliberate departure from this project's earlier "don't execute
+description names. `gindema-cli` is a real, working pipeline —
+`demo`/`assemble`/`info`/`run`/`remap`/`pack`/`unpack` — that now uses
+every crate in the workspace except `gindema-guard` (which has no game
+here to protect); see `docs/gindema-cli.md` for why that one still isn't
+wired up. `gindema-container` is implemented too: an encrypted asset
+archive built on `dixscript`'s real AES-256-GCM/gzip primitives (not its
+AST-driven pipeline — see `docs/gindema-container.md` for why), with
+honeypot slots and lazy per-asset decryption. Building and testing it
+means `dixscript`'s own crypto code actually ran in the sandbox, a
+deliberate departure from this project's earlier "don't execute
 DixScript-Rust" practice — flagged prominently in that doc rather than
-done quietly, and **not yet confirmed against the real GitHub Actions
-workflow**.
+done quietly. **The whole workspace's `ci.yml` has now been run for real
+on GitHub Actions for the first time** (rustc 1.100.0, commit `f8e0115`:
+189 tests passed, clippy and fmt both clean) — every crate above,
+`gindema-container` included, had only ever been sandbox-verified before
+that.
 `mirage-ffmpeg` and `mirage-cli` are also still scaffold stage. `pixelflip-*`
 is real and working. `mirage-core` (pattern format and frame application)
 and `mirage-train` (offline training and evaluation against CLIP) are
