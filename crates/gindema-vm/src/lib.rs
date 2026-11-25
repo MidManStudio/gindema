@@ -16,8 +16,14 @@
 //! This first pass is deliberately scoped to a correct, safe, well-tested
 //! core rather than a complete one: see `docs/gindema-vm.md`'s "Known
 //! limits" for what's intentionally not here yet (functions/calls, more
-//! value types, any obfuscation). A textual assembly syntax now exists
-//! ([`assemble`]) -- see its own module docs for the syntax.
+//! value types). A textual assembly syntax now exists ([`assemble`]) -- see
+//! its own module docs for the syntax. [`decode_program`] decodes an
+//! already-built program back into a structured instruction list --
+//! `gindema-obfuscate`'s control-flow flattening pass is built on it.
+//! [`interleave_fluff`] is state-dependent decoding's bytecode-format
+//! mechanism -- the one piece of that pass that had to live here rather
+//! than entirely in `gindema-obfuscate`, unlike honeypot injection or
+//! flattening; see its own module docs for why.
 //!
 //! # Example
 //!
@@ -43,7 +49,9 @@
 //! ```
 
 mod asm;
+mod decode;
 mod error;
+mod fluff;
 mod opcode;
 mod opcode_map;
 mod program;
@@ -53,7 +61,9 @@ mod value;
 mod vm;
 
 pub use asm::{assemble, AsmError};
+pub use decode::{decode_program, resolve_jump_target, DecodedInstr, Operand};
 pub use error::{SerializeError, VmError};
+pub use fluff::interleave_fluff;
 pub use opcode::{
     OpCode, CONST_INDEX_WIDTH, JUMP_TARGET_WIDTH, LOCAL_SLOT_WIDTH, OPCODE_COUNT, OPCODE_WIDTH,
 };

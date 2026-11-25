@@ -25,10 +25,30 @@ losslessly re-encode an already-built `Program` under a different raw
 opcode numbering, with every bit offset in the stream staying valid. It
 still has no opinion on the *policy* — generating the actual random
 permutation for a given build is `gindema-obfuscate`'s job, which calls
-into this mechanism rather than reimplementing it. Control-flow
-flattening, state-dependent decoding, and honeypot/dead-end injection
-remain entirely `gindema-obfuscate`'s, with no corresponding support here
-yet.
+into this mechanism rather than reimplementing it.
+
+**State-dependent decoding is the same split, but this time the mechanism
+itself needed real work here, not just a pass-through type.**
+`interleave_fluff` (`fluff.rs`) interleaves pseudo-random junk bits before
+every instruction, in an amount derived purely from the seed and that
+instruction's own bit position — never stored explicitly in the stream.
+This is the one piece of that pass that couldn't live entirely in
+`gindema-obfuscate` the way honeypot injection does: moving instructions
+later in the stream invalidates every absolute jump target after the
+first fluff region, so something with byte-and-bit-level knowledge of the
+format has to recompute them, the same way `remap_program` already needed
+that knowledge for a simpler reason. `gindema-obfuscate`'s policy wrapper
+over this is correspondingly thin — there's no permutation to choose, just
+a seed to pass through.
+
+Control-flow flattening's *mechanism* is `decode_program` (`decode.rs`) —
+reading an already-built program back into a structured instruction list,
+rather than the raw bit stream — but the actual flattening logic (finding
+basic blocks, building the dispatcher loop) is still entirely
+`gindema-obfuscate`'s; `decode_program` is useful on its own regardless of
+flattening (see its own section below). Honeypot/dead-end injection needed
+no corresponding mechanism here at all — it operates entirely through
+`ProgramBuilder`'s existing public API, before a program is even built.
 
 **A textual assembly language now exists** (`asm.rs`, `assemble`) — see
 that module's own doc comment for the syntax. This closes what was,
@@ -216,6 +236,106 @@ containing its own `Halt`, followed by real, reachable code — remapping
 and then running it must still reach that real code, not stop at the dead
 `Halt`.
 
+### `decode.rs`
+**What it does:** `decode_program(&Program) -> Result<Vec<DecodedInstr>,
+VmError>` — walks a program's stream (exactly `code_bit_len` bits, same
+exact-length discipline as `remap_program`, for the same honeypot-shaped
+reason) and returns every instruction's opcode, interpreted `Operand`
+(`None`/`ConstIndex(u16)`/`LocalSlot(u8)`/`JumpTarget(u64)`), and the bit
+range it occupies. `resolve_jump_target(&[DecodedInstr], end_bit, target)
+-> Result<Option<usize>, VmError>` resolves a `Jump`/`JumpIfFalse` target
+to the index of the instruction it points at, or `None` for the "jump past
+the very last instruction" case (a label placed at a program's end with
+nothing after it — see `program.rs`'s own note on why that's a valid
+target with no instruction actually there).
+
+**Why this exists as its own thing, separate from `vm.rs`'s and
+`remap.rs`'s own decode loops:** those two decode-and-immediately-*do*-
+something (execute; re-encode) one instruction at a time, and don't need a
+structured result. `gindema-obfuscate`'s control-flow flattening pass
+needs the *opposite*: the whole instruction list up front, with real bit
+offsets, before it can find basic-block boundaries at all. Rather than
+have flattening grow its own third copy of the opcode/operand decode
+logic, it's factored out here once. Also closes part of the former "no
+disassembler" known limit — not a human-readable disassembler (nothing
+here prints anything), but the structural half of one.
+
+**`bit_offset` is captured before fluff is skipped, deliberately:** a
+`DecodedInstr`'s `bit_offset` always equals the value a `Jump`/
+`JumpIfFalse` targeting it actually encodes, whether or not the program
+carries fluff — see `fluff.rs`'s section below for why that specific
+convention is what keeps fluff invisible to every caller of this function,
+`gindema-obfuscate`'s flattening pass included.
+
+**Tests:** inline. Straight-line arithmetic decodes in order with the
+right operands; a loop program's two jump targets both resolve to a real
+instruction's `bit_offset`; `resolve_jump_target` recognizes the implicit
+end and rejects a target matching no instruction at all (line 3 of a
+single-`Halt` program, Debug-printed by the assertion that actually proves
+it rather than the lucky-coincidence padding path that would otherwise
+decode it as a bogus instruction); decoding a fluffed program gives back
+the identical opcodes/operands (modulo jump targets' absolute values,
+which necessarily shift) as decoding the same program unfluffed.
+
+### `fluff.rs`
+**What it does:** `interleave_fluff(&Program, seed: u64) -> Result<Program,
+VmError>` — the bytecode-format mechanism behind state-dependent decoding
+(see the Overview section above for the mechanism/policy split).
+`fluff_len_at(seed, bit_pos) -> u32` (private) is the single function both
+the encoder and `Vm::run`'s decode loop call to agree on how much junk
+precedes the instruction at `bit_pos`, under `seed` — a pure function of
+those two numbers, nothing else, capped at `MAX_FLUFF_BITS = 7`.
+`skip_fluff`/`copy_fluff` (private, `pub(crate)`) are the shared "do the
+right thing at this position" helpers `vm.rs`, `decode.rs`, and `remap.rs`
+all call rather than each reimplementing the same skip logic slightly
+differently.
+
+**Why bit *position*, not instruction *index*, is the key:** the first
+design that comes to mind — draw a fluff length per sequential instruction
+index from one continuously-advancing RNG stream — breaks the moment a
+`Jump` lands somewhere other than "the next instruction in program order."
+The VM would need to know *which* instruction index it just landed on to
+resume the stream correctly, which means either threading an index through
+every jump target (a second format change on top of fluff itself) or
+re-deriving it some other way. Keying fluff length off the reader's
+*current bit position* instead sidesteps this entirely: wherever the
+reader ends up — by falling through sequentially, or by
+`BitReader::seek_to_bit` from a jump — recomputing `fluff_len_at(seed,
+reader.bit_pos())` always recovers the exact same length the encoder used
+there, because the encoder computed it from that exact same position when
+it originally wrote the fluff. No index, counter, or table, anywhere.
+Jump targets keep meaning "an absolute bit offset" exactly like they
+always have — they just now point at where an instruction's *fluff*
+starts, not its opcode.
+
+**Composability with the other three passes:** `interleave_fluff` is
+built on `decode_program`, so it transparently re-fluffs an
+already-fluffed program under a new seed (discarding the old fluff, not
+stacking two layers) and tolerates a non-identity opcode map already
+being in place. `remap_program` was updated (via the shared `copy_fluff`
+helper) to read-and-copy-through any existing fluff unchanged rather than
+misreading it as a bogus opcode, carrying the same `fluff_seed` into its
+output — so `fluff` then `remap` composes in either order. Flattening
+does *not* compose transparently the same way: `flatten_control_flow`
+always rebuilds via `ProgramBuilder`, which has no fluff concept, so
+flattening an already-fluffed program silently produces a *clean* (never
+fluffed) result — see `docs/gindema-obfuscate.md`'s own notes on why
+fluff (and remap) belong *after* flattening in a pipeline, not before.
+
+**Tests:** inline. A fluffed program's bit length grows (or, for a program
+too short to get any nonzero-length draws, stays equal — never shrinks)
+and carries its seed; running a fluffed loop program gives the identical
+answer running the original does; the same seed is byte-for-byte
+deterministic, different seeds usually differ; re-fluffing an already-
+fluffed program replaces (doesn't stack) the old fluff; a program with a
+dead honeypot-shaped branch still decodes its real tail correctly once
+fluffed (mirroring `remap.rs`'s own regression test, for the same
+honeypot-shaped reason, applied to this pass instead); remapping a fluffed
+program preserves both its fluff and its behavior; a fluffed program
+round-trips through `to_bytes`/`from_bytes` correctly; `fluff_len_at` never
+exceeds `MAX_FLUFF_BITS`; `fluff_bits_at` never produces a value wider than
+its requested width (including the zero-width case).
+
 ### `program.rs`
 **What it does:** `Instr` (the builder's intermediate instruction
 representation — jump operands are `LabelId`s here, not yet bit offsets),
@@ -272,11 +392,10 @@ time on the same (now-emptied) builder just produces an empty program
 instead of erroring, which is harmless but not a documented, relied-on
 behavior.
 
-**No assembly syntax:** a program is built by calling builder methods
-directly (`b.load_const(idx).add().halt()`), not by parsing a textual
-instruction listing. Enough to drive and test the interpreter; a real
-assembler (or a higher-level language gindema-obfuscate compiles from) is
-future work.
+**`fluff_seed: Option<u64>`:** `Some(seed)` once a program has been through
+`interleave_fluff`, `None` otherwise — `ProgramBuilder::build` always
+produces `None`, the same way it always produces `OpcodeMap::identity()`.
+See `fluff.rs`'s section above.
 
 **Tests:** inline. An empty (`halt`-only) program's byte length; an
 unplaced label failing `build` with `UnresolvedLabel`; a label placed at the
@@ -313,17 +432,27 @@ local-slot indices both reported with the offending index in the error.
 ### `serialize.rs`
 **What it does:** `Program::to_bytes(&self) -> Vec<u8>` /
 `Program::from_bytes(&[u8]) -> Result<Program, SerializeError>` — a
-self-contained binary file format: magic `b"GVMP"`, a `u16` version, the
-`local_count` byte, `code_bit_len` as a little-endian `u64`, the opcode
-table as `OPCODE_COUNT` raw bytes (one per `OpCode::ALL` entry — enough on
-its own to rebuild the full `OpcodeMap` via `from_permutation`), the
-constant pool (a `u32` count, then each value as a 1-byte type tag plus an
-8-byte little-endian payload, or 1 byte for `Bool`), then the bytecode
-itself (a `u32` length, then that many bytes). Little-endian and
-byte-aligned throughout — deliberately not bit-packed the way `code`
-itself is; there's no reason for the *container* around an already
-bit-packed stream to also be bit-level, and byte alignment makes the
-format easier to read by eye in a hex dump.
+self-contained binary file format: magic `b"GVMP"`, a `u16` version
+(currently `2`), the `local_count` byte, `code_bit_len` as a little-endian
+`u64`, a `fluff_seed` presence byte (`0` absent, `1` present — followed by
+the 8-byte little-endian seed only when present, so the common unfluffed
+case costs one extra byte over the pre-fluff format, not a fixed nine),
+the opcode table as `OPCODE_COUNT` raw bytes (one per `OpCode::ALL` entry
+— enough on its own to rebuild the full `OpcodeMap` via
+`from_permutation`), the constant pool (a `u32` count, then each value as
+a 1-byte type tag plus an 8-byte little-endian payload, or 1 byte for
+`Bool`), then the bytecode itself (a `u32` length, then that many bytes).
+Little-endian and byte-aligned throughout — deliberately not bit-packed
+the way `code` itself is; there's no reason for the *container* around an
+already bit-packed stream to also be bit-level, and byte alignment makes
+the format easier to read by eye in a hex dump.
+
+**Version bumped 1 → 2 for `fluff_seed`, a breaking change, deliberately:**
+a version-1 file's bytes have no `fluff_seed` field at all, and there's no
+way to tell "this is an old file with no fluff" apart from "this is a
+corrupted new file" from the bytes alone — so version 1 is now rejected
+with `SerializeError::UnsupportedVersion(1)` rather than silently assumed
+to mean `fluff_seed: None`. See "Fixes and Problems" below.
 
 This is what makes a `Program` persistable at all — without it, a program
 only ever exists for the lifetime of one process. `gindema-cli`'s `demo`/
@@ -338,29 +467,39 @@ on a truncated buffer.
 **Tests:** inline. Round-trips a program containing all three `Value`
 kinds (`to_bytes` then `from_bytes` gives back an equal `Program`, and
 running both gives the same result); round-trips a *remapped* program's
-non-identity opcode table specifically, not just the identity case; wrong
-magic, an unsupported version, an invalid constant type tag, and a
-corrupted (duplicate-raw-value) opcode table are all rejected with the
-right `SerializeError` variant; truncating the byte buffer at every
-possible length is rejected with `UnexpectedEof` rather than panicking
-(not just one hand-picked truncation point).
+non-identity opcode table specifically, not just the identity case;
+round-trips a *fluffed* program's seed specifically, confirming it still
+runs correctly after the round trip; wrong magic, an unsupported version,
+an invalid constant type tag, an invalid fluff-flag byte, and a corrupted
+(duplicate-raw-value) opcode table are all rejected with the right
+`SerializeError` variant; version `1` specifically (the pre-fluff format,
+not just an arbitrary unsupported value) is confirmed rejected; truncating
+the byte buffer at every possible length is rejected with `UnexpectedEof`
+rather than panicking (not just one hand-picked truncation point).
 
 ## Known limits (intentional, for this pass)
 
 - No functions or calls — no call stack, no `Call`/`Return` opcodes. Every
   program is one flat instruction stream.
 - No strings, arrays, or heap objects — `Value` is `Int`/`Float`/`Bool` only.
-- No disassembler — `assemble` goes one way (text to `Program`); there's no
-  way to go back from a `Program` to readable assembly text yet, only
-  `gindema-cli info`'s coarse byte/constant/local-count summary.
+- No disassembler — `assemble` goes one way (text to `Program`); `decode_program`
+  gives the structural half of a disassembler back (a `Program` to a
+  decoded instruction list), but nothing here prints readable assembly
+  text from one yet.
 - `assemble`'s own known limits (no constant-pool deduplication, one label
   per line) are documented on that module above, not repeated here.
-- `ProgramBuilder::build` always produces the identity `OpcodeMap` — this
-  crate never randomizes a program's own numbering on its own. The
-  mechanism to re-encode under a different map exists (`remap_program`),
-  but choosing or generating that map is entirely `gindema-obfuscate`'s
-  job. Control-flow flattening, state-dependent decoding, and honeypot/
-  dead-end injection have no support here at all yet.
+- `ProgramBuilder::build` always produces the identity `OpcodeMap` and
+  `fluff_seed: None` — this crate never randomizes a program's own
+  numbering or adds fluff on its own. The mechanisms exist
+  (`remap_program`, `interleave_fluff`), but choosing or generating a
+  permutation or a seed is entirely `gindema-obfuscate`'s job.
+  Control-flow flattening and honeypot/dead-end injection have no
+  supporting mechanism here at all (flattening needed one, `decode_program`
+  — honeypot injection didn't, since it works entirely through
+  `ProgramBuilder`'s existing public API).
+- `MAX_FLUFF_BITS = 7` is a fixed constant, not configurable per call —
+  reasonable for a first pass; a program with unusually tight size
+  constraints has no way to ask for less overhead than that.
 - `gindema-ptr` is not yet used anywhere in this crate (see "Overview").
 - The interpreter's bit-by-bit decode (inherited from `gindema-bits`, see
   that crate's own "Known limits") is not optimized; nothing here has shown
@@ -369,16 +508,37 @@ possible length is rejected with `UnexpectedEof` rather than panicking
 ## CI and Workflows
 
 See `.github/workflows/ci.yml` (workspace-wide, workflow_dispatch only).
-`cargo test -p gindema-vm` runs 58 unit tests + 2 doctests (up from 39 + 1,
-the new ones all in `asm.rs`); `cargo clippy -p gindema-vm --all-targets --
+`cargo test -p gindema-vm` runs 75 unit tests + 2 doctests (up from 58 + 2:
+5 new in `decode.rs`, 9 new in `fluff.rs`, 3 new in `serialize.rs`'s own
+tests for the format change); `cargo clippy -p gindema-vm --all-targets --
 -D warnings` and `cargo fmt -p gindema-vm -- --check` are both clean.
-Verified in the sandbox on Rust 1.100, and this crate is part of the
-workspace-wide `cargo test`/`clippy`/`fmt` that `ci.yml` has now actually
-run successfully on the real GitHub Actions runner (commit `f8e0115`) —
-see the root `README.md`/`CHANGELOG.md` for that confirmation.
+Verified in the sandbox on Rust 1.100. This crate was part of the
+workspace-wide `cargo test`/`clippy`/`fmt` that `ci.yml` ran successfully
+on the real GitHub Actions runner at commit `f8e0115` (189 tests) — that
+confirmation predates this session's `decode.rs`/`fluff.rs` work, which is
+sandbox-verified only so far; see the root `README.md`/`CHANGELOG.md`.
 
 ## Fixes and Problems
 
+- **Deliberate breaking format change, not a bug fix:** adding
+  `fluff_seed` to `Program` meant `serialize.rs`'s file format needed a new
+  field, and there's no way to add it such that an *old* (version-1) file's
+  bytes could still be told apart from "this is secretly fluffed but the
+  reader doesn't know to look." Rather than guess or default silently,
+  `VERSION` was bumped to `2` and version `1` now fails with
+  `UnsupportedVersion(1)` — any `.gvm` file written before this change
+  needs regenerating (via `gindema-cli demo`/`assemble`) to load again. A
+  dedicated test (`version_1_the_pre_fluff_format_is_now_unsupported`)
+  pins this down explicitly, separate from the pre-existing "some arbitrary
+  unsupported version is rejected" test, so the breaking change itself has
+  its own regression coverage.
+- **Design decision worth recording:** state-dependent decoding's fluff
+  length is keyed on the reader's current *bit position*, not a
+  sequentially-advancing instruction *index* — see `fluff.rs`'s section
+  above for why the index-based version breaks the moment a `Jump` lands
+  anywhere other than the next instruction in program order, and how
+  keying off position instead avoids needing any new per-jump bookkeeping
+  at all.
 - **Real bug, caught by `gindema-cli`'s own tests, not this crate's own:**
   `remap_program` originally stopped decoding at the first `Halt` opcode.
   The first time a program containing a `gindema-obfuscate` honeypot was

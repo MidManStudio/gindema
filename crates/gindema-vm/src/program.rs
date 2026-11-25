@@ -140,6 +140,12 @@ pub struct Program {
     pub(crate) constants: Vec<Value>,
     pub(crate) local_count: u8,
     pub(crate) opcode_map: OpcodeMap,
+    /// `Some(seed)` if this program's stream has been interleaved with
+    /// state-dependent fluff bits (see [`crate::interleave_fluff`]/
+    /// `docs/gindema-vm.md`'s `fluff.rs` section); `None` otherwise.
+    /// [`ProgramBuilder::build`] always produces `None`, the same way it
+    /// always produces [`OpcodeMap::identity`].
+    pub(crate) fluff_seed: Option<u64>,
 }
 
 impl Program {
@@ -190,6 +196,15 @@ impl Program {
     /// [`crate::remap_program`] carries whatever map it was remapped to.
     pub fn opcode_map(&self) -> &OpcodeMap {
         &self.opcode_map
+    }
+
+    /// The seed this program's stream was interleaved with state-dependent
+    /// fluff bits under, if it has been — see [`crate::interleave_fluff`].
+    /// `None` for a program fresh out of [`ProgramBuilder::build`], or one
+    /// that's only been through [`crate::remap_program`] with no fluff pass
+    /// involved at all.
+    pub fn fluff_seed(&self) -> Option<u64> {
+        self.fluff_seed
     }
 }
 
@@ -403,6 +418,7 @@ impl ProgramBuilder {
             constants,
             local_count: self.local_count,
             opcode_map: OpcodeMap::identity(),
+            fluff_seed: None,
         })
     }
 }

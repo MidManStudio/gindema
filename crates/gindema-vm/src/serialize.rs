@@ -11,8 +11,13 @@ use crate::value::Value;
 
 /// Magic bytes identifying a serialized gindema-vm program file.
 const MAGIC: &[u8; 4] = b"GVMP";
-/// The only format version this crate currently reads or writes.
-const VERSION: u16 = 1;
+/// The only format version this crate currently reads or writes. Bumped
+/// from `1` to `2` when `fluff_seed` was added to [`Program`] — see "Fixes
+/// and Problems" in `docs/gindema-vm.md`: a version-1 file is now rejected
+/// with [`SerializeError::UnsupportedVersion`] rather than silently read as
+/// if it had no fluff, since there is no way to tell those two cases apart
+/// from a version-1 file's bytes alone.
+const VERSION: u16 = 2;
 
 const VALUE_TAG_INT: u8 = 0;
 const VALUE_TAG_FLOAT: u8 = 1;
@@ -108,6 +113,17 @@ impl Program {
         out.push(self.local_count);
         out.extend_from_slice(&self.code_bit_len.to_le_bytes());
 
+        // `fluff_seed`: one presence byte, then the seed itself only if
+        // present — the common (unfluffed) case costs one extra byte over
+        // the pre-fluff format, not a fixed nine.
+        match self.fluff_seed {
+            Some(seed) => {
+                out.push(1);
+                out.extend_from_slice(&seed.to_le_bytes());
+            }
+            None => out.push(0),
+        }
+
         // The opcode table, as the one raw value each canonical opcode
         // encodes to, in `OpCode::ALL` order — enough on its own to
         // reconstruct the full `OpcodeMap` via `from_permutation`.
@@ -160,6 +176,12 @@ impl Program {
         let local_count = r.u8()?;
         let code_bit_len = r.u64_le()?;
 
+        let fluff_seed = match r.u8()? {
+            0 => None,
+            1 => Some(r.u64_le()?),
+            other => return Err(SerializeError::InvalidFluffFlag(other)),
+        };
+
         let mut raw_values = [0u8; OPCODE_COUNT];
         for slot in &mut raw_values {
             *slot = r.u8()?;
@@ -188,6 +210,7 @@ impl Program {
             constants,
             local_count,
             opcode_map,
+            fluff_seed,
         })
     }
 }
@@ -279,9 +302,10 @@ mod tests {
         b.halt();
         let mut bytes = b.build().unwrap().to_bytes();
         // Byte layout: 4 magic + 2 version + 1 local_count + 8 code_bit_len
+        // + 1 fluff-flag (no seed bytes follow it for an unfluffed program)
         // + OPCODE_COUNT opcode table + 4 constant count = the tag byte of
         // the first constant comes right after that.
-        let tag_offset = 4 + 2 + 1 + 8 + OPCODE_COUNT + 4;
+        let tag_offset = 4 + 2 + 1 + 8 + 1 + OPCODE_COUNT + 4;
         bytes[tag_offset] = 99;
         assert_eq!(
             Program::from_bytes(&bytes),
@@ -292,11 +316,54 @@ mod tests {
     #[test]
     fn duplicate_opcode_table_entries_are_rejected() {
         let mut bytes = ProgramBuilder::new(0).halt().build().unwrap().to_bytes();
-        let table_offset = 4 + 2 + 1 + 8;
+        let table_offset = 4 + 2 + 1 + 8 + 1;
         bytes[table_offset + 1] = bytes[table_offset];
         assert!(matches!(
             Program::from_bytes(&bytes),
             Err(SerializeError::OpcodeMap(_))
         ));
+    }
+
+    #[test]
+    fn version_1_the_pre_fluff_format_is_now_unsupported() {
+        // Bumped to 2 when `fluff_seed` was added -- see this file's
+        // `VERSION` doc comment. A version-1 file can't be told apart from
+        // a version-2 file with no fluff by its bytes alone, so it's
+        // rejected rather than silently misread.
+        let mut bytes = ProgramBuilder::new(0).halt().build().unwrap().to_bytes();
+        bytes[4] = 1;
+        bytes[5] = 0;
+        assert_eq!(
+            Program::from_bytes(&bytes),
+            Err(SerializeError::UnsupportedVersion(1))
+        );
+    }
+
+    #[test]
+    fn invalid_fluff_flag_byte_is_rejected() {
+        let mut bytes = ProgramBuilder::new(0).halt().build().unwrap().to_bytes();
+        let flag_offset = 4 + 2 + 1 + 8;
+        bytes[flag_offset] = 2;
+        assert_eq!(
+            Program::from_bytes(&bytes),
+            Err(SerializeError::InvalidFluffFlag(2))
+        );
+    }
+
+    #[test]
+    fn round_trips_a_fluffed_programs_seed() {
+        let mut b = ProgramBuilder::new(1);
+        let five = b.add_const(Value::Int(5)).unwrap();
+        b.load_const(five).store_local(0).load_local(0).halt();
+        let original = b.build().unwrap();
+        let fluffed = crate::fluff::interleave_fluff(&original, 0xBEEF).unwrap();
+
+        let bytes = fluffed.to_bytes();
+        let restored = Program::from_bytes(&bytes).unwrap();
+        assert_eq!(restored, fluffed);
+        assert_eq!(restored.fluff_seed(), Some(0xBEEF));
+
+        let mut vm = Vm::new();
+        assert_eq!(vm.run(&restored).unwrap(), Some(Value::Int(5)));
     }
 }

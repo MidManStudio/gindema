@@ -2,6 +2,55 @@
 
 ## [Unreleased]
 
+- **`gindema-obfuscate`'s last two passes are implemented: control-flow
+  flattening and state-dependent decoding.** All four of this crate's
+  planned passes now exist.
+  - `gindema-vm` gained the infrastructure both needed: `decode_program`
+    (`decode.rs`) decodes an already-built `Program` back into a
+    structured instruction list — closes part of the former "no
+    disassembler" known limit, and is genuinely reusable beyond
+    flattening alone. `interleave_fluff` (`fluff.rs`) is state-dependent
+    decoding's actual bytecode-format mechanism: interleaves pseudo-random
+    junk bits before every instruction, in an amount derived purely from a
+    seed and that instruction's own bit *position* (deliberately not
+    instruction *index* — see that module's docs for why the index-based
+    design breaks the moment a `Jump` lands somewhere other than "the next
+    instruction in program order"), and rewrites every jump target
+    accordingly. `Program` gained a `fluff_seed: Option<u64>` field;
+    `remap_program` was made fluff-aware (reads and copies existing fluff
+    through unchanged via a new shared `copy_fluff` helper, rather than
+    misreading it as a bogus opcode) so opcode remap and fluff compose in
+    either order. **Breaking file-format change:** the on-disk format
+    version bumped 1 → 2 for the new field; a version-1 `.gvm` file is now
+    rejected with `SerializeError::UnsupportedVersion(1)` rather than
+    silently assumed unfluffed, since the two cases can't be told apart
+    from a version-1 file's bytes alone. `gindema-vm`: 75 unit tests + 2
+    doctests (up from 58 + 2: 17 new, across `decode.rs`, `fluff.rs`, and
+    `serialize.rs`'s format-change coverage).
+  - `gindema-obfuscate` gained `flatten_control_flow` (`flatten.rs`):
+    decodes a program into basic blocks (via `gindema_vm::decode_program`)
+    and rebuilds it as a single dispatcher loop, so every inter-block
+    transfer — including an ordinary block's own fallthrough into the next
+    one — reads as "set a state local, jump back to the dispatcher"
+    instead of a direct jump wherever the destination sits. Reserves one
+    extra local slot for the dispatcher's own state (`ObfuscateError::
+    TooManyLocals` if the input already uses all 255 a `u8` allows, rather
+    than overflowing). The one residual direct branch `JumpIfFalse`
+    still needs (no select/ternary opcode exists to avoid it) and the
+    dispatcher's unchecked last case are both documented known limits, not
+    hidden. `obfuscate_with_fluff` (`fluff.rs`) is a thin policy wrapper
+    over `gindema_vm::interleave_fluff` — there's no permutation to choose
+    for this pass, unlike opcode remap's real policy job. `lib.rs` gained
+    this crate's first composability tests, chaining all four passes
+    (honeypot → flatten → fluff → remap) end to end, plus a deliberate
+    out-of-order case confirming flatten-after-fluff is still *correct*
+    even though it silently discards the fluff (flattening always rebuilds
+    clean via `ProgramBuilder`, documented in both crates' docs as the
+    reason flatten belongs first in a pipeline). 22 unit tests + 4
+    doctests (up from 11 + 2).
+  - Both new mechanisms are sandbox-verified only so far — added after the
+    commit `f8e0115` real-CI confirmation below, not yet covered by a real
+    GitHub Actions run of their own.
 - **CI confirmed for real.** `ci.yml` was run on the project's actual
   GitHub Actions for the first time — previously every crate in this
   workspace, `gindema-container` included, had only ever been

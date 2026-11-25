@@ -6,6 +6,7 @@
 use gindema_bits::{BitReader, BitWriter};
 
 use crate::error::VmError;
+use crate::fluff::copy_fluff;
 use crate::opcode::OPCODE_WIDTH;
 use crate::opcode_map::OpcodeMap;
 use crate::program::Program;
@@ -42,6 +43,14 @@ use crate::program::Program;
 /// remap the program compiled from the one fixed `gindema-vm` baseline.
 /// This function itself has no opinion on how `new_map` was chosen.
 ///
+/// Fluff-aware (see `docs/gindema-vm.md`'s `fluff.rs` section): if
+/// `program` carries fluff, each region is read and copied through to the
+/// output completely unchanged (via [`crate::fluff::copy_fluff`]) rather
+/// than being misread as a bogus opcode — opcode remapping and fluff are
+/// independent layers, so remapping never needs to regenerate or move
+/// fluff, only step over it correctly. The output keeps the same
+/// [`Program::fluff_seed`] as the input.
+///
 /// # Errors
 /// [`VmError::InvalidOpcode`] if a raw opcode byte in `program`'s stream
 /// doesn't decode under `program.opcode_map()` — a malformed program, not
@@ -53,6 +62,7 @@ pub fn remap_program(program: &Program, new_map: &OpcodeMap) -> Result<Program, 
     let end_bit = program.code_bit_len();
 
     while reader.bit_pos() < end_bit {
+        copy_fluff(&mut reader, &mut writer, program)?;
         let raw = reader.read_bits(OPCODE_WIDTH)? as u8;
         let opcode = program
             .opcode_map()
@@ -78,6 +88,7 @@ pub fn remap_program(program: &Program, new_map: &OpcodeMap) -> Result<Program, 
         constants: program.constants().to_vec(),
         local_count: program.local_count(),
         opcode_map: new_map.clone(),
+        fluff_seed: program.fluff_seed(),
     })
 }
 

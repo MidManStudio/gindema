@@ -39,6 +39,18 @@ pub enum VmError {
     /// program, as opposed to a valid stream with semantically invalid
     /// operands (those get their own variants above).
     Bits(BitsError),
+    /// A `Jump`/`JumpIfFalse` target (see [`crate::decode_program`]) didn't
+    /// match any instruction's bit offset and wasn't exactly the program's
+    /// own end either — not something [`crate::ProgramBuilder`] can
+    /// produce, but a decoded instruction list could in principle come
+    /// from anywhere. See [`crate::resolve_jump_target`].
+    InvalidJumpTarget(u64),
+    /// A transform that can grow a program's bit length (currently only
+    /// [`crate::interleave_fluff`]) would have pushed it past the 32-bit
+    /// jump-target range — the same limit
+    /// [`crate::BuildError::ProgramTooLarge`] enforces at build time, hit
+    /// here instead because the growth happens after building.
+    ProgramTooLarge,
 }
 
 impl fmt::Display for VmError {
@@ -53,6 +65,8 @@ impl fmt::Display for VmError {
             Self::InvalidLocalSlot(s) => write!(f, "invalid local slot {s}"),
             Self::StepLimitExceeded => write!(f, "exceeded the interpreter's step limit"),
             Self::Bits(e) => write!(f, "malformed bytecode stream: {e}"),
+            Self::InvalidJumpTarget(t) => write!(f, "jump target {t} matches no instruction"),
+            Self::ProgramTooLarge => write!(f, "program exceeds a 32-bit jump target range"),
         }
     }
 }
@@ -82,6 +96,10 @@ pub enum SerializeError {
     UnexpectedEof,
     /// A constant's type tag byte wasn't one this crate defines.
     InvalidValueTag(u8),
+    /// The `fluff_seed` presence byte wasn't `0` (absent) or `1` (present,
+    /// followed by the 8-byte seed) — see `docs/gindema-vm.md`'s
+    /// `serialize.rs` section for the exact layout.
+    InvalidFluffFlag(u8),
     /// The stored opcode permutation was invalid (see [`OpcodeMapError`]) —
     /// implies the data was corrupted or hand-edited, since
     /// [`crate::Program::to_bytes`] never writes one that isn't valid.
@@ -95,6 +113,7 @@ impl fmt::Display for SerializeError {
             Self::UnsupportedVersion(v) => write!(f, "unsupported program file version {v}"),
             Self::UnexpectedEof => write!(f, "program file ended unexpectedly"),
             Self::InvalidValueTag(t) => write!(f, "invalid constant type tag {t}"),
+            Self::InvalidFluffFlag(b) => write!(f, "invalid fluff-seed presence byte {b}"),
             Self::OpcodeMap(e) => write!(f, "invalid opcode table in program file: {e}"),
         }
     }

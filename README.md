@@ -9,13 +9,18 @@ Protection core: `gindema-ptr` (vendored type-erased pointer primitives),
 this ended up written fresh rather than literally vendored), and
 `gindema-vm` (the baseline bytecode interpreter, with `OpcodeMap`/
 `remap_program` for per-build remapping, `Program::to_bytes`/`from_bytes`
-for persisting a program to a file, and now `assemble` — a minimal textual
+for persisting a program to a file, `assemble` — a minimal textual
 assembly language, so a program no longer has to be built by calling
-`ProgramBuilder` methods directly in Rust) are implemented and tested.
-`gindema-obfuscate` has two of its four passes — per-build opcode remap
-and honeypot/dead-end injection, see `docs/gindema-obfuscate.md`
-(including honest limits on how strong each one currently is) — but not
-yet control-flow flattening or state-dependent decoding. `gindema-guard`
+`ProgramBuilder` methods directly in Rust — and now `decode_program`
+(structured decoding of an already-built program) and `interleave_fluff`
+(state-dependent decoding's bytecode-format mechanism)) are implemented
+and tested. `gindema-obfuscate` now has all four of its passes — per-build
+opcode remap, honeypot/dead-end injection, control-flow flattening (a
+single dispatcher loop every inter-block transfer routes through), and
+state-dependent decoding (`obfuscate_with_fluff`) — see
+`docs/gindema-obfuscate.md` for honest limits on how strong each one
+currently is, and for the one correct pipeline order (honeypot, then
+flatten, then fluff, then opcode remap) the four compose in. `gindema-guard`
 has its first real pass too — timing/checksum watchdog plus
 pollution-state reads, see `docs/gindema-guard.md` for real limits — but
 doesn't use `gindema-ptr` yet and isn't wired into anything.
@@ -33,11 +38,15 @@ honeypot slots and lazy per-asset decryption. Building and testing it
 means `dixscript`'s own crypto code actually ran in the sandbox, a
 deliberate departure from this project's earlier "don't execute
 DixScript-Rust" practice — flagged prominently in that doc rather than
-done quietly. **The whole workspace's `ci.yml` has now been run for real
-on GitHub Actions for the first time** (rustc 1.100.0, commit `f8e0115`:
-189 tests passed, clippy and fmt both clean) — every crate above,
+done quietly. **The whole workspace's `ci.yml` has been run for real on
+GitHub Actions once already** (rustc 1.100.0, commit `f8e0115`: 189 tests
+passed, clippy and fmt both clean) — every crate up to that point,
 `gindema-container` included, had only ever been sandbox-verified before
-that.
+that. `gindema-vm`'s `decode_program`/`interleave_fluff` and
+`gindema-obfuscate`'s `flatten_control_flow`/`obfuscate_with_fluff`
+(control-flow flattening and state-dependent decoding) were added after
+that confirmed run and are **sandbox-verified only so far** — not yet
+through a real CI run of their own.
 `mirage-ffmpeg` and `mirage-cli` are also still scaffold stage. `pixelflip-*`
 is real and working. `mirage-core` (pattern format and frame application)
 and `mirage-train` (offline training and evaluation against CLIP) are

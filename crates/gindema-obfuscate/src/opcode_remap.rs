@@ -5,29 +5,44 @@
 
 use std::fmt;
 
-use gindema_vm::{remap_program, OpcodeMap, Program, VmError, OPCODE_COUNT};
+use gindema_vm::{remap_program, BuildError, OpcodeMap, Program, VmError, OPCODE_COUNT};
 
 use gindema_common::SplitMix64;
 
-/// Everything that can go wrong remapping a program's opcode table.
+/// Everything that can go wrong in one of this crate's passes.
 ///
-/// In practice this can only happen for a [`Program`] that didn't come from
-/// [`gindema_vm::ProgramBuilder`] (e.g. one deserialized from a file by a
-/// future loader) — a program built the normal way is always well-formed,
-/// so remapping it can't fail. The error is still surfaced rather than
-/// assumed away, since this crate doesn't control how every `Program` it's
-/// ever handed got built.
+/// `Vm` (from opcode remap, flattening, or the fluff wrapper's underlying
+/// [`gindema_vm::decode_program`]/[`gindema_vm::interleave_fluff`] calls)
+/// and `Build` (from flattening's own [`gindema_vm::ProgramBuilder`] calls
+/// while reassembling a flattened program) can, in practice, only happen
+/// for a [`Program`] that didn't come from `ProgramBuilder` in the first
+/// place — one built the normal way is always well-formed, so running any
+/// of these passes on it can't fail that way. The errors are still
+/// surfaced rather than assumed away, since this crate doesn't control how
+/// every `Program` it's ever handed got built. `TooManyLocals` is
+/// flattening's own, separate concern — see [`crate::flatten_control_flow`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum ObfuscateError {
-    /// The underlying [`gindema_vm::remap_program`] call failed — the
-    /// program's own bytecode stream was malformed.
+    /// An underlying `gindema-vm` call failed — the program's own bytecode
+    /// stream was malformed.
     Vm(VmError),
+    /// Reassembling a transformed program via [`gindema_vm::ProgramBuilder`]
+    /// failed.
+    Build(BuildError),
+    /// [`crate::flatten_control_flow`] needs one more local slot than the
+    /// input program declared, and the input already declared the maximum
+    /// a `u8` count allows (255).
+    TooManyLocals,
 }
 
 impl fmt::Display for ObfuscateError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Vm(e) => write!(f, "could not remap program: {e}"),
+            Self::Vm(e) => write!(f, "{e}"),
+            Self::Build(e) => write!(f, "{e}"),
+            Self::TooManyLocals => {
+                write!(f, "program already uses the maximum 255 local slots")
+            }
         }
     }
 }
@@ -37,6 +52,12 @@ impl std::error::Error for ObfuscateError {}
 impl From<VmError> for ObfuscateError {
     fn from(e: VmError) -> Self {
         Self::Vm(e)
+    }
+}
+
+impl From<BuildError> for ObfuscateError {
+    fn from(e: BuildError) -> Self {
+        Self::Build(e)
     }
 }
 

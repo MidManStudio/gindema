@@ -6,6 +6,7 @@
 use gindema_bits::BitReader;
 
 use crate::error::VmError;
+use crate::fluff::skip_fluff;
 use crate::opcode::{OpCode, CONST_INDEX_WIDTH, JUMP_TARGET_WIDTH, LOCAL_SLOT_WIDTH, OPCODE_WIDTH};
 use crate::program::Program;
 use crate::value::Value;
@@ -50,6 +51,10 @@ impl Vm {
     /// Same as [`Vm::run`], with an explicit cap on the number of
     /// instructions executed before giving up with
     /// [`VmError::StepLimitExceeded`].
+    ///
+    /// Transparently skips state-dependent fluff bits if `program` carries
+    /// any (see `docs/gindema-vm.md`'s `fluff.rs` section) — nothing about
+    /// running a fluffed program looks different from the caller's side.
     pub fn run_with_step_limit(
         &mut self,
         program: &Program,
@@ -65,6 +70,7 @@ impl Vm {
             }
             steps += 1;
 
+            skip_fluff(&mut reader, program)?;
             let opcode_byte = reader.read_bits(OPCODE_WIDTH)? as u8;
             let opcode = program
                 .opcode_map()
