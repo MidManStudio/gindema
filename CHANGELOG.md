@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+- **`gindema-cli` gained `flatten`/`fluff` subcommands**, wiring up
+  `gindema-obfuscate`'s `flatten_control_flow`/`obfuscate_with_fluff` (the
+  previous entry below) so they can actually be run on a real program file
+  without writing Rust — this project's whole workflow has no local
+  toolchain to do that with otherwise. Both take the exact
+  `<input> <output> --seed <S>` shape `remap` already used; `remap`'s own
+  argument parser was generalized into a shared `parse_input_output_seed`
+  rather than copy-pasted twice more. Documented, and demonstrated by hand
+  in the sandbox: `flatten` must come before `fluff`/`remap` in a pipeline
+  or it silently discards whichever ran first (still correct, just not
+  what was probably intended) — run for real on a `demo --honeypots 1`
+  program through the full recommended order
+  (`flatten` → `fluff` → `remap` → `run`, `Int(55)` at every stage) and
+  through the wrong order too, confirming the discarded-fluff behavior is
+  real and not just a documentation claim. `gindema-cli`: 33 unit tests
+  (up from 25: 4 new in `cli.rs`, 4 new in `commands.rs`).
 - **`gindema-obfuscate`'s last two passes are implemented: control-flow
   flattening and state-dependent decoding.** All four of this crate's
   planned passes now exist.

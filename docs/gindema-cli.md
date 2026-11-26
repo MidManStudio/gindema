@@ -14,10 +14,15 @@ still useful as a zero-setup smoke test.
 
 Ties together `gindema-vm` (`Program`, `ProgramBuilder`, `Vm`, `assemble`,
 `Program::to_bytes`/`from_bytes`), `gindema-obfuscate` (`inject_honeypot`,
-`remap_opcodes`), and now `gindema-container` (`ContainerBuilder`,
+`remap_opcodes`, and now `flatten_control_flow`/`obfuscate_with_fluff`,
+its other two passes), and `gindema-container` (`ContainerBuilder`,
 `ContainerKey`, `ContainerReader`) via `pack`/`unpack`. Still does
 **not** use `gindema-guard` — see "Known limits" for why it doesn't fit
-this crate's actual job, rather than it simply being forgotten.
+this crate's actual job, rather than it simply being forgotten. This is
+also the only way to actually *run* `flatten`/`fluff` outside a Rust test —
+they were implemented and unit-tested in `gindema-obfuscate` first, but
+had no command-line entry point until this delta, so there was no way to
+try them on a real program file without writing Rust.
 
 ## Subcommands
 
@@ -27,6 +32,8 @@ gindema-cli assemble <source> <output>
 gindema-cli info <input>
 gindema-cli run <input>
 gindema-cli remap <input> <output> --seed <S>
+gindema-cli flatten <input> <output> --seed <S>
+gindema-cli fluff <input> <output> --seed <S>
 gindema-cli pack <output> <input>... [--honeypots N] [--seed S]
 gindema-cli unpack <input> --key <BASE64> <output-dir>
 gindema-cli help
@@ -51,6 +58,24 @@ gindema-cli help
   the same length and behaves identically — only its opcode numbering
   differs; see `docs/gindema-vm.md` and `docs/gindema-obfuscate.md` for why
   that's guaranteed rather than merely expected.
+- **`flatten`** loads a program file, calls
+  `gindema_obfuscate::flatten_control_flow` with the given seed, and writes
+  the (now larger — a dispatcher loop and one extra local slot aren't
+  free) result to a new file. Behaves identically; see
+  `docs/gindema-obfuscate.md`'s `flatten.rs` section for what actually
+  changed structurally.
+- **`fluff`** loads a program file, calls
+  `gindema_obfuscate::obfuscate_with_fluff` with the given seed, and writes
+  the (also larger, by a smaller and more variable amount) result to a new
+  file. Behaves identically; see `docs/gindema-vm.md`'s `fluff.rs` section
+  for the mechanism.
+- **Pipeline order matters for `flatten`/`fluff`/`remap`:** apply `flatten`
+  first, then `fluff`, then `remap`, if you want all three on one program.
+  `flatten` always rebuilds from scratch via `ProgramBuilder`, so applying
+  it *after* `fluff` or `remap` silently discards whichever ran first
+  (still correct — the program still runs right — just not what running
+  `fluff`/`remap` first probably intended). See
+  `docs/gindema-obfuscate.md`'s Overview section for the full reasoning.
 - **`pack`** reads every `<input>` file, packs them into a new
   gindema-container archive (`--honeypots`/`--seed` as for `demo`'s
   honeypots, but these are decoy *asset slots*, not bytecode — see
@@ -77,27 +102,33 @@ you asked for didn't work."
 **What it does:** `Command` (one variant per subcommand, including
 `Help`), `parse_args(&[String]) -> Result<Command, ArgsError>`, and
 `USAGE`. Deliberately hand-rolled rather than built on a crate like `clap`:
-seven subcommands with a handful of positional paths, a variable-length
+nine subcommands with a handful of positional paths, a variable-length
 input list for `pack`, and a few optional `--seed`/`--honeypots`/`--key`
 flags between them still doesn't need a general-purpose argument parser,
 and keeping this crate's own dependency footprint small felt like the
-right trade for that parsing logic. `parse_pack` is the one subcommand
-whose positional count isn't fixed — it splits on a leading `output` plus
-one-or-more trailing `inputs` via a slice pattern (`[output, inputs @ ..]`)
-the same way `parse_remap`'s fixed-arity `[input, output]` pattern already
-worked, just with a variable-length tail. Kept entirely separate from
-actually running a command (`commands.rs`) specifically so parsing itself
-is unit-testable without touching the filesystem — every test in this file
-calls `parse_args` directly and checks the resulting `Command` or that it's
-an `Err`, never spawning the actual binary.
+right trade for that parsing logic. `parse_input_output_seed` is shared by
+`remap`, `flatten`, and `fluff` — all three take the exact same
+`<input> <output> --seed <S>` shape and differ only in which
+`gindema-vm`/`gindema-obfuscate` function `commands.rs` goes on to call
+with the parsed result; `remap`'s own parser was generalized into this
+rather than copy-pasted twice more. `parse_pack` is still the one
+subcommand whose positional count isn't fixed — it splits on a leading
+`output` plus one-or-more trailing `inputs` via a slice pattern
+(`[output, inputs @ ..]`). Kept entirely separate from actually running a
+command (`commands.rs`) specifically so parsing itself is unit-testable
+without touching the filesystem — every test in this file calls
+`parse_args` directly and checks the resulting `Command` or that it's an
+`Err`, never spawning the actual binary.
 
-**Tests:** inline, 15 (up from 9). No args or `help`/`--help` all give
-`Command::Help`; `demo` with no flags defaults `honeypots`/`seed` to `0`;
-`demo` with both flags in either order; `demo` missing its output path
-errors; `info`/`run` each require exactly one path (zero or two both
-error); `remap` needs both paths and `--seed`, and errors without the
-seed; an unknown subcommand and an unknown flag both error; a non-numeric
-`--seed` value errors instead of panicking on the `.parse::<u64>()` call;
+**Tests:** inline, 19 (up from 15: 2 new for `flatten`, 2 new for
+`fluff`, mirroring `remap`'s own pair exactly since all three now share
+one parser). No args or `help`/`--help` all give `Command::Help`; `demo`
+with no flags defaults `honeypots`/`seed` to `0`; `demo` with both flags
+in either order; `demo` missing its output path errors; `info`/`run` each
+require exactly one path (zero or two both error); `remap`/`flatten`/
+`fluff` each need both paths and `--seed`, and error without the seed; an
+unknown subcommand and an unknown flag both error; a non-numeric `--seed`
+value errors instead of panicking on the `.parse::<u64>()` call;
 `assemble` needs exactly a source and an output path; `pack` with one
 input and no flags, with multiple inputs and both flags, and missing its
 output or any input all error correctly; `unpack` with `--key` and two
@@ -109,12 +140,13 @@ the one fixed demo program (2 locals: a running sum and a counter; sums
 `1..=10` via `Lt`/`JumpIfFalse`/`Jump`, so there's a real loop and real
 jump targets for the rest of the pipeline to exercise, not just straight-
 line arithmetic) — plus `run_demo`/`run_info`/`run_run`/`run_remap`/
-`run_assemble`/`run_pack`/`run_unpack`, each doing real file I/O
-(`std::fs::read`/`write`) and returning `Result<(), Box<dyn Error>>`.
-`Box<dyn Error>` rather than a crate-specific enum: this is the actual end
-of the pipeline (nothing calls these functions except `main`, which only
-ever needs to print the error and set an exit code), so there's no caller
-that would benefit from matching on a specific variant the way
+`run_flatten`/`run_fluff`/`run_assemble`/`run_pack`/`run_unpack`, each
+doing real file I/O (`std::fs::read`/`write`) and returning
+`Result<(), Box<dyn Error>>`. `Box<dyn Error>` rather than a
+crate-specific enum: this is the actual end of the pipeline (nothing calls
+these functions except `main`, which only ever needs to print the error
+and set an exit code), so there's no caller that would benefit from
+matching on a specific variant the way
 `VmError`/`BuildError`/`SerializeError`/`ObfuscateError`/`ContainerError`
 all need to be matchable deeper in the stack. `pack_assets`/`unpack_all`
 are `run_pack`/`run_unpack`'s filesystem-free cores — `pack_assets` takes
@@ -122,9 +154,12 @@ already-read asset bytes and returns `(ContainerKey, Vec<u8>)`;
 `unpack_all` takes archive bytes and a key and returns every real asset's
 bytes, in order — kept separate from the `std::fs` calls around them for
 the same reason `build_demo_program` is separate from `run_demo`: so the
-logic itself is unit-testable without touching disk.
+logic itself is unit-testable without touching disk. `run_flatten`'s and
+`run_fluff`'s own doc comments are where the "apply flatten before
+fluff/remap" pipeline-order advice actually lives, since that's where
+someone wiring these into a script would read it.
 
-**Tests:** inline, 10 (up from 6), all pure (no filesystem access —
+**Tests:** inline, 14 (up from 10), all pure (no filesystem access —
 `run_*`'s file I/O isn't itself unit tested, only `build_demo_program`/
 `pack_assets`/`unpack_all` and the library calls they feed into). The demo
 program with zero honeypots sums to `55`; with all 3 honeypot slots
@@ -134,10 +169,15 @@ output; the demo program round-trips through `to_bytes`/`from_bytes` and
 still runs correctly; remapping the demo program (the one with a honeypot
 included) preserves its behavior — this last test is the one that
 actually caught the real `gindema-vm` bug described below, the first time
-it ran; assembling a short text program produces a `Program` that runs
-correctly; packing then unpacking round-trips the original asset bytes
-exactly; honeypots don't change which assets come back or their order;
-unpacking with the wrong key fails cleanly (an `Err`, not a panic).
+it ran; flattening and, separately, fluffing the demo program each
+preserve its behavior; flattening then fluffing then remapping the demo
+program in the recommended pipeline order all composes, confirmed by
+checking the final `fluff_seed()` survived the trailing remap step, not
+just that the final answer is still right; assembling a short text program
+produces a `Program` that runs correctly; packing then unpacking
+round-trips the original asset bytes exactly; honeypots don't change
+which assets come back or their order; unpacking with the wrong key fails
+cleanly (an `Err`, not a panic).
 
 ## Known limits (intentional, for this pass)
 
@@ -166,36 +206,52 @@ unpacking with the wrong key fails cleanly (an `Err`, not a panic).
   directly** — `gindema-vm` and `gindema-obfuscate` already use
   `gindema-bits`; nothing in this crate's own code needs either directly.
 - **No build-pipeline integration beyond this CLI itself.** Running
-  `remap`/`pack` by hand with a manually-chosen seed is the whole story
-  right now; nothing automatically picks a fresh seed per build or calls
-  this as part of a packaging step.
+  `flatten`/`fluff`/`remap`/`pack` by hand with manually-chosen seeds is
+  the whole story right now; nothing automatically picks a fresh seed per
+  build, enforces the recommended `flatten` → `fluff` → `remap` order, or
+  calls any of this as part of a packaging step.
 
 ## CI and Workflows
 
 See `.github/workflows/ci.yml` (workspace-wide, workflow_dispatch only).
-`cargo test -p gindema-cli` runs 25 unit tests (up from 15: 15 in `cli.rs`,
-10 in `commands.rs`); `cargo clippy -p gindema-cli --all-targets -- -D
-warnings` and `cargo fmt -p gindema-cli -- --check` are both clean. Beyond
-the unit tests, the actual built binary was run end-to-end by hand in the
-sandbox twice this session: the original `demo --honeypots 3` → `info` →
-`run` (`Int(55)`) → `remap --seed 777` → `info`/`run` on the remapped file
-(`opcode map: remapped (non-identity)`, `Int(55)` again) → `run` on a
-nonexistent file (exit code 1); and, for the new subcommands, a
-hand-written `.gasm` loop-sum-to-10 program through `assemble` → `info`/
-`run` (`Int(55)`) → `remap` → `info`/`run` again, `assemble` on a file
-with a deliberately bad mnemonic (exit code 1, clear "unknown instruction"
-error, not a panic), and `pack` on two files → `unpack` with the printed
-key (both files recovered byte-for-byte) → `unpack` with a malformed key
-and separately with a well-formed-but-wrong key (both fail cleanly with
-exit code 1, the latter via dixscript's own decryption-failure error, not
-a panic) — not just `cargo test`. Verified in the sandbox on Rust 1.100.
+`cargo test -p gindema-cli` runs 33 unit tests (up from 25: 4 new in
+`cli.rs`, 4 new in `commands.rs`); `cargo clippy -p gindema-cli
+--all-targets -- -D warnings` and `cargo fmt -p gindema-cli -- --check`
+are both clean. Beyond the unit tests, the actual built binary was run
+end-to-end by hand in the sandbox three times across this crate's
+sessions: `demo --honeypots 3` → `info` → `run` (`Int(55)`) →
+`remap --seed 777` → `info`/`run` on the remapped file (`opcode map:
+remapped (non-identity)`, `Int(55)` again) → `run` on a nonexistent file
+(exit code 1); `assemble`/`pack`/`unpack` (see that delivery's own notes);
+and, for `flatten`/`fluff` specifically, the full recommended pipeline on
+a `demo --honeypots 1` program — `flatten` (211 → 370 bytes, 2 locals → 3)
+→ `fluff` (370 → 407 bytes) → `remap` (407 bytes, unchanged — opcode
+remap never changes length) → `run` at every stage along the way, all
+giving `Int(55)` — plus the documented wrong-order case run for real
+(`fluff` then `flatten` on the same starting program lands at exactly 370
+bytes, the same size as flattening the un-fluffed original directly,
+confirming the fluff really is discarded rather than silently kept) and a
+missing-file error on `flatten` itself (exit code 1, no panic). Verified
+in the sandbox on Rust 1.100.
 
-This crate is also now part of the workspace-wide `cargo test`/`clippy`/
-`fmt` that `ci.yml` has actually run successfully on the real GitHub
-Actions runner for the first time (commit `f8e0115`, 189 tests passed) —
-see the root `README.md`/`CHANGELOG.md`.
+This crate was part of the workspace-wide `cargo test`/`clippy`/`fmt` that
+`ci.yml` ran successfully on the real GitHub Actions runner at commit
+`f8e0115` (189 tests) — that confirmation predates `flatten`/`fluff`
+(both this crate's wiring and the passes themselves), which are
+sandbox-verified only so far; see the root `README.md`/`CHANGELOG.md`.
 
 ## Fixes and Problems
+
+- **Why `flatten`/`fluff` weren't in the previous delivery:** they were
+  implemented and unit-tested in `gindema-obfuscate` in the same session
+  `gindema-vm`'s supporting `decode_program`/`interleave_fluff` were
+  built, but not wired into this crate until asked for specifically — the
+  gap being that a library function with no CLI entry point has no way to
+  be run on a real `.gvm` file without writing Rust, which this project's
+  whole workflow (GitHub web UI, no local toolchain) can't do. `remap`'s
+  existing parser was generalized into `parse_input_output_seed` rather
+  than copy-pasted twice, once this delta needed the exact same
+  `<input> <output> --seed <S>` shape two more times.
 
 - The first real run of `commands::tests::remapping_the_demo_program_preserves_its_behavior`
   (a demo program built with one honeypot, then remapped) failed with

@@ -7,7 +7,9 @@ use std::error::Error;
 use std::path::Path;
 
 use gindema_container::{ContainerBuilder, ContainerError, ContainerKey, ContainerReader};
-use gindema_obfuscate::{inject_honeypot, remap_opcodes};
+use gindema_obfuscate::{
+    flatten_control_flow, inject_honeypot, obfuscate_with_fluff, remap_opcodes,
+};
 use gindema_vm::{assemble, OpcodeMap, Program, ProgramBuilder, Value, Vm};
 
 /// Builds the one fixed demo program this crate ships: sums `1..=10` via a
@@ -123,6 +125,47 @@ pub fn run_remap(input: &Path, output: &Path, seed: u64) -> Result<(), Box<dyn E
         "wrote {} ({} bytes), opcode table remapped with seed {seed} -- same behavior as {}",
         output.display(),
         out_bytes.len(),
+        input.display(),
+    );
+    Ok(())
+}
+
+/// `flatten <input> <output> --seed <seed>`: control-flow flattening (see
+/// `gindema_obfuscate::flatten_control_flow`). Apply this *before*
+/// `fluff`/`remap` in a pipeline, not after -- flattening always rebuilds
+/// from scratch, so it would otherwise silently discard either one (see
+/// `docs/gindema-obfuscate.md`'s "Known limits").
+pub fn run_flatten(input: &Path, output: &Path, seed: u64) -> Result<(), Box<dyn Error>> {
+    let bytes = std::fs::read(input)?;
+    let program = Program::from_bytes(&bytes)?;
+    let flattened = flatten_control_flow(&program, seed)?;
+    let out_bytes = flattened.to_bytes();
+    std::fs::write(output, &out_bytes)?;
+    println!(
+        "wrote {} ({} bytes, up from {}), flattened into a dispatcher loop with seed {seed} -- same behavior as {}",
+        output.display(),
+        out_bytes.len(),
+        bytes.len(),
+        input.display(),
+    );
+    Ok(())
+}
+
+/// `fluff <input> <output> --seed <seed>`: state-dependent decoding (see
+/// `gindema_obfuscate::obfuscate_with_fluff`). Apply `flatten` first if
+/// you want both -- fluffing then flattening would discard the fluff (see
+/// `run_flatten`'s own doc comment above).
+pub fn run_fluff(input: &Path, output: &Path, seed: u64) -> Result<(), Box<dyn Error>> {
+    let bytes = std::fs::read(input)?;
+    let program = Program::from_bytes(&bytes)?;
+    let fluffed = obfuscate_with_fluff(&program, seed)?;
+    let out_bytes = fluffed.to_bytes();
+    std::fs::write(output, &out_bytes)?;
+    println!(
+        "wrote {} ({} bytes, up from {}), fluffed with seed {seed} -- same behavior as {}",
+        output.display(),
+        out_bytes.len(),
+        bytes.len(),
         input.display(),
     );
     Ok(())
@@ -274,6 +317,38 @@ mod tests {
         let program = build_demo_program(1, 5);
         let remapped = remap_opcodes(&program, 999).unwrap();
         assert_ne!(remapped.code_bytes(), program.code_bytes());
+        let mut vm = Vm::new();
+        assert_eq!(vm.run(&remapped).unwrap(), Some(Value::Int(55)));
+    }
+
+    #[test]
+    fn flattening_the_demo_program_preserves_its_behavior() {
+        let program = build_demo_program(0, 0);
+        let flattened = flatten_control_flow(&program, 13).unwrap();
+        assert_ne!(flattened.code_bytes(), program.code_bytes());
+        let mut vm = Vm::new();
+        assert_eq!(vm.run(&flattened).unwrap(), Some(Value::Int(55)));
+    }
+
+    #[test]
+    fn fluffing_the_demo_program_preserves_its_behavior() {
+        let program = build_demo_program(0, 0);
+        let fluffed = obfuscate_with_fluff(&program, 14).unwrap();
+        assert!(fluffed.code_bit_len() >= program.code_bit_len());
+        let mut vm = Vm::new();
+        assert_eq!(vm.run(&fluffed).unwrap(), Some(Value::Int(55)));
+    }
+
+    #[test]
+    fn flattening_then_fluffing_then_remapping_the_demo_program_still_composes() {
+        // The CLI's own recommended pipeline order (see run_flatten's doc
+        // comment): flatten, then fluff, then remap.
+        let program = build_demo_program(1, 15);
+        let flattened = flatten_control_flow(&program, 16).unwrap();
+        let fluffed = obfuscate_with_fluff(&flattened, 17).unwrap();
+        let remapped = remap_opcodes(&fluffed, 18).unwrap();
+        assert_eq!(remapped.fluff_seed(), Some(17));
+
         let mut vm = Vm::new();
         assert_eq!(vm.run(&remapped).unwrap(), Some(Value::Int(55)));
     }

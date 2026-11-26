@@ -28,6 +28,24 @@ pub enum Command {
         output: PathBuf,
         seed: u64,
     },
+    /// Control-flow flattening: loads `input`, rebuilds it as a single
+    /// `seed`-derived dispatcher loop (see
+    /// `gindema_obfuscate::flatten_control_flow`), writes the result to
+    /// `output`.
+    Flatten {
+        input: PathBuf,
+        output: PathBuf,
+        seed: u64,
+    },
+    /// State-dependent decoding: loads `input`, interleaves `seed`-derived
+    /// fluff bits between every instruction (see
+    /// `gindema_obfuscate::obfuscate_with_fluff`), writes the result to
+    /// `output`.
+    Fluff {
+        input: PathBuf,
+        output: PathBuf,
+        seed: u64,
+    },
     /// Compiles a gindema-vm assembly text file (see
     /// `gindema_vm::assemble`) into a program file.
     Assemble { source: PathBuf, output: PathBuf },
@@ -82,7 +100,27 @@ pub fn parse_args(args: &[String]) -> Result<Command, ArgsError> {
         "demo" => parse_demo(rest),
         "info" => parse_single_path(rest, "info").map(|input| Command::Info { input }),
         "run" => parse_single_path(rest, "run").map(|input| Command::Run { input }),
-        "remap" => parse_remap(rest),
+        "remap" => {
+            parse_input_output_seed(rest, "remap").map(|(input, output, seed)| Command::Remap {
+                input,
+                output,
+                seed,
+            })
+        }
+        "flatten" => {
+            parse_input_output_seed(rest, "flatten").map(|(input, output, seed)| Command::Flatten {
+                input,
+                output,
+                seed,
+            })
+        }
+        "fluff" => {
+            parse_input_output_seed(rest, "fluff").map(|(input, output, seed)| Command::Fluff {
+                input,
+                output,
+                seed,
+            })
+        }
         "assemble" => parse_two_paths(rest, "assemble")
             .map(|(source, output)| Command::Assemble { source, output }),
         "pack" => parse_pack(rest),
@@ -192,7 +230,14 @@ fn parse_demo(rest: &[String]) -> Result<Command, ArgsError> {
     })
 }
 
-fn parse_remap(rest: &[String]) -> Result<Command, ArgsError> {
+/// Shared by `remap`, `flatten`, and `fluff` — all three take exactly the
+/// same shape (`<input> <output> --seed <S>`) and differ only in which
+/// `gindema-vm`/`gindema-obfuscate` function `commands.rs` goes on to call
+/// with the result.
+fn parse_input_output_seed(
+    rest: &[String],
+    name: &str,
+) -> Result<(PathBuf, PathBuf, u64), ArgsError> {
     let mut positionals = Vec::new();
     let mut seed = None;
     let mut iter = rest.iter();
@@ -200,22 +245,18 @@ fn parse_remap(rest: &[String]) -> Result<Command, ArgsError> {
         match arg.as_str() {
             "--seed" => seed = Some(parse_u64_flag(&mut iter, "--seed")?),
             _ if arg.starts_with("--") => {
-                return Err(err(format!("unknown flag '{arg}' for 'remap'")))
+                return Err(err(format!("unknown flag '{arg}' for '{name}'")))
             }
             path => positionals.push(path),
         }
     }
     let [input, output] = positionals.as_slice() else {
-        return Err(err(
-            "'remap' needs exactly an input and an output file path",
-        ));
+        return Err(err(format!(
+            "'{name}' needs exactly an input and an output file path"
+        )));
     };
-    let seed = seed.ok_or_else(|| err("'remap' needs --seed <number>"))?;
-    Ok(Command::Remap {
-        input: PathBuf::from(input),
-        output: PathBuf::from(output),
-        seed,
-    })
+    let seed = seed.ok_or_else(|| err(format!("'{name}' needs --seed <number>")))?;
+    Ok((PathBuf::from(input), PathBuf::from(output), seed))
 }
 
 fn parse_u64_flag<'a>(
@@ -232,12 +273,16 @@ fn parse_u64_flag<'a>(
 /// Printed by `Command::Help` and by a parse error that's about overall
 /// usage rather than one bad flag.
 pub const USAGE: &str = "\
-gindema-cli: assemble, build, remap, run, and inspect gindema-vm bytecode
-programs, and pack/unpack gindema-container asset archives.
+gindema-cli: assemble, build, remap, flatten, fluff, run, and inspect
+gindema-vm bytecode programs, and pack/unpack gindema-container asset
+archives.
 
 'demo' still builds a fixed built-in program; 'assemble' compiles an
 arbitrary gindema-vm assembly text file instead (see docs/gindema-cli.md
-and gindema_vm::assemble for the syntax).
+and gindema_vm::assemble for the syntax). 'flatten' and 'fluff' are
+gindema-obfuscate's other two passes, alongside 'remap' -- apply them in
+that order (flatten, then fluff, then remap) for a correct pipeline; see
+docs/gindema-obfuscate.md for why.
 
 USAGE:
     gindema-cli demo <output> [--honeypots N] [--seed S]
@@ -245,6 +290,8 @@ USAGE:
     gindema-cli info <input>
     gindema-cli run <input>
     gindema-cli remap <input> <output> --seed <S>
+    gindema-cli flatten <input> <output> --seed <S>
+    gindema-cli fluff <input> <output> --seed <S>
     gindema-cli pack <output> <input>... [--honeypots N] [--seed S]
     gindema-cli unpack <input> --key <BASE64> <output-dir>
     gindema-cli help
@@ -343,6 +390,64 @@ mod tests {
     fn remap_without_seed_errors() {
         let args = vec![
             "remap".to_string(),
+            "in.gvm".to_string(),
+            "out.gvm".to_string(),
+        ];
+        assert!(parse_args(&args).is_err());
+    }
+
+    #[test]
+    fn flatten_needs_two_paths_and_a_seed() {
+        let args = vec![
+            "flatten".to_string(),
+            "in.gvm".to_string(),
+            "out.gvm".to_string(),
+            "--seed".to_string(),
+            "7".to_string(),
+        ];
+        assert_eq!(
+            parse_args(&args).unwrap(),
+            Command::Flatten {
+                input: PathBuf::from("in.gvm"),
+                output: PathBuf::from("out.gvm"),
+                seed: 7,
+            }
+        );
+    }
+
+    #[test]
+    fn flatten_without_seed_errors() {
+        let args = vec![
+            "flatten".to_string(),
+            "in.gvm".to_string(),
+            "out.gvm".to_string(),
+        ];
+        assert!(parse_args(&args).is_err());
+    }
+
+    #[test]
+    fn fluff_needs_two_paths_and_a_seed() {
+        let args = vec![
+            "fluff".to_string(),
+            "in.gvm".to_string(),
+            "out.gvm".to_string(),
+            "--seed".to_string(),
+            "99".to_string(),
+        ];
+        assert_eq!(
+            parse_args(&args).unwrap(),
+            Command::Fluff {
+                input: PathBuf::from("in.gvm"),
+                output: PathBuf::from("out.gvm"),
+                seed: 99,
+            }
+        );
+    }
+
+    #[test]
+    fn fluff_without_seed_errors() {
+        let args = vec![
+            "fluff".to_string(),
             "in.gvm".to_string(),
             "out.gvm".to_string(),
         ];

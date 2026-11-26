@@ -3,11 +3,13 @@
 // live in docs/gindema-cli.md, section "main.rs"
 // ============================================================================
 
-//! The gindema CLI: assembles, builds, remaps, runs, and inspects
-//! gindema-vm bytecode program files, and packs/unpacks gindema-container
-//! asset archives. See `docs/gindema-cli.md` for what this does and -- just
-//! as importantly -- does not do yet (no build-pipeline integration, and
-//! `gindema-guard` isn't used here at all; see that doc's "Known limits"
+//! The gindema CLI: assembles, builds, remaps, flattens, fluffs, runs, and
+//! inspects gindema-vm bytecode program files, and packs/unpacks
+//! gindema-container asset archives. See `docs/gindema-cli.md` for what
+//! this does and -- just as importantly -- does not do yet (no
+//! build-pipeline integration tying the four obfuscation passes together
+//! automatically, and `gindema-guard` isn't used here at all; see that doc's
+//! "Known limits"
 //! for why).
 
 mod cli;
@@ -45,6 +47,16 @@ fn main() {
             output,
             seed,
         } => commands::run_remap(&input, &output, seed),
+        Command::Flatten {
+            input,
+            output,
+            seed,
+        } => commands::run_flatten(&input, &output, seed),
+        Command::Fluff {
+            input,
+            output,
+            seed,
+        } => commands::run_fluff(&input, &output, seed),
         Command::Assemble { source, output } => commands::run_assemble(&source, &output),
         Command::Pack {
             output,

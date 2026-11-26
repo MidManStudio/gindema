@@ -28,10 +28,11 @@ doesn't use `gindema-ptr` yet and isn't wired into anything.
 `gindema-guard`; a shared `SplitMix64`, used by `gindema-obfuscate` and
 `gindema-container`), though not yet the shared error types/traits its own
 description names. `gindema-cli` is a real, working pipeline —
-`demo`/`assemble`/`info`/`run`/`remap`/`pack`/`unpack` — that now uses
-every crate in the workspace except `gindema-guard` (which has no game
-here to protect); see `docs/gindema-cli.md` for why that one still isn't
-wired up. `gindema-container` is implemented too: an encrypted asset
+`demo`/`assemble`/`info`/`run`/`remap`/`flatten`/`fluff`/`pack`/`unpack` —
+that now uses every crate in the workspace except `gindema-guard` (which
+has no game here to protect); see `docs/gindema-cli.md` for why that one
+still isn't wired up, and for the recommended `flatten` → `fluff` →
+`remap` pipeline order if you want all three on one program. `gindema-container` is implemented too: an encrypted asset
 archive built on `dixscript`'s real AES-256-GCM/gzip primitives (not its
 AST-driven pipeline — see `docs/gindema-container.md` for why), with
 honeypot slots and lazy per-asset decryption. Building and testing it
@@ -42,11 +43,12 @@ done quietly. **The whole workspace's `ci.yml` has been run for real on
 GitHub Actions once already** (rustc 1.100.0, commit `f8e0115`: 189 tests
 passed, clippy and fmt both clean) — every crate up to that point,
 `gindema-container` included, had only ever been sandbox-verified before
-that. `gindema-vm`'s `decode_program`/`interleave_fluff` and
+that. `gindema-vm`'s `decode_program`/`interleave_fluff`,
 `gindema-obfuscate`'s `flatten_control_flow`/`obfuscate_with_fluff`
-(control-flow flattening and state-dependent decoding) were added after
-that confirmed run and are **sandbox-verified only so far** — not yet
-through a real CI run of their own.
+(control-flow flattening and state-dependent decoding), and `gindema-cli`'s
+new `flatten`/`fluff` subcommands exposing them were all added after that
+confirmed run and are **sandbox-verified only so far** — not yet through a
+real CI run of their own.
 `mirage-ffmpeg` and `mirage-cli` are also still scaffold stage. `pixelflip-*`
 is real and working. `mirage-core` (pattern format and frame application)
 and `mirage-train` (offline training and evaluation against CLIP) are
